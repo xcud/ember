@@ -8,5 +8,7 @@
 pub mod manifest;
 pub mod modrinth;
 pub mod import;
+pub mod download;
+pub mod sync;
 
 pub use manifest::{Loader, Pack, Lock, LockedMod, UnresolvedMod};

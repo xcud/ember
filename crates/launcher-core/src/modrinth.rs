@@ -14,6 +14,7 @@ const API: &str = "https://api.modrinth.com/v2";
 const USER_AGENT: &str =
     "positronic-ai/ember/0.1.0 (ben@positronic.ai)";
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
 }
@@ -62,6 +63,11 @@ impl Client {
             .user_agent(USER_AGENT)
             .build()?;
         Ok(Self { http })
+    }
+
+    /// The underlying HTTP client, for modules that need to stream downloads.
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
     }
 
     /// Look up many files at once by SHA-1. Returns a map of `sha1 -> Version`

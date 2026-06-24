@@ -12,18 +12,111 @@ use std::path::PathBuf;
 use launcher_core::import::import_mods_dir;
 use launcher_core::manifest::Loader;
 use launcher_core::modrinth::Client;
+use launcher_core::sync::{self, ModStatus, SyncOptions};
+
+const USAGE: &str = "ember (first slice)
+
+Usage:
+  ember import <mods_dir> [--name NAME] [--game VERSION] [--loader LOADER] [--out DIR]
+  ember sync  [--lock pack.lock] [--mods DIR] [--cache DIR] [--concurrency N] [--prune]";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let cmd = args.next().unwrap_or_default();
-    if cmd != "import" {
-        eprintln!(
-            "ember (first slice)\n\nUsage:\n  ember import <mods_dir> [--name NAME] [--game VERSION] [--loader LOADER] [--out DIR]"
-        );
-        std::process::exit(2);
+    match cmd.as_str() {
+        "import" => cmd_import(args).await,
+        "sync" => cmd_sync(args).await,
+        _ => {
+            eprintln!("{USAGE}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn default_cache_dir() -> PathBuf {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+        return PathBuf::from(xdg).join("ember");
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join(".cache").join("ember");
+    }
+    PathBuf::from(".ember-cache")
+}
+
+async fn cmd_sync(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let mut lock_path = PathBuf::from("pack.lock");
+    let mut mods_dir = PathBuf::from("mods");
+    let mut cache_dir = default_cache_dir();
+    let mut concurrency = 8usize;
+    let mut prune = false;
+
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--lock" => lock_path = PathBuf::from(args.next().unwrap_or_default()),
+            "--mods" => mods_dir = PathBuf::from(args.next().unwrap_or_default()),
+            "--cache" => cache_dir = PathBuf::from(args.next().unwrap_or_default()),
+            "--concurrency" => {
+                concurrency = args.next().and_then(|s| s.parse().ok()).unwrap_or(8)
+            }
+            "--prune" => prune = true,
+            other => {
+                eprintln!("unexpected argument: {other}\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
     }
 
+    let lock = sync::load_lock(&lock_path)?;
+    let client = Client::new()?;
+    let opts = SyncOptions { concurrency, cache_dir: cache_dir.clone(), prune };
+
+    eprintln!(
+        "Syncing {} mods -> {}  (cache: {})",
+        lock.mods.len(),
+        mods_dir.display(),
+        cache_dir.display()
+    );
+    let report = sync::sync(client.http(), &lock, &mods_dir, &opts).await?;
+
+    for r in &report.results {
+        let tag = match r.status {
+            ModStatus::UpToDate => "ok  ",
+            ModStatus::Cached => "cache",
+            ModStatus::Downloaded => "get ",
+        };
+        println!("  [{tag}] {}  ({})", r.slug, r.filename);
+    }
+    for name in &report.pruned {
+        println!("  [prune] {name}");
+    }
+    for (slug, err) in &report.failures {
+        println!("  [FAIL] {slug}: {err}");
+    }
+
+    println!(
+        "\n{} up-to-date, {} from cache, {} downloaded{}{}",
+        report.count(ModStatus::UpToDate),
+        report.count(ModStatus::Cached),
+        report.count(ModStatus::Downloaded),
+        if report.pruned.is_empty() {
+            String::new()
+        } else {
+            format!(", {} pruned", report.pruned.len())
+        },
+        if report.failures.is_empty() {
+            String::new()
+        } else {
+            format!(", {} FAILED", report.failures.len())
+        },
+    );
+    if !report.failures.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+async fn cmd_import(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let mut mods_dir: Option<PathBuf> = None;
     let mut name: Option<String> = None;
     let mut game: Option<String> = None;
