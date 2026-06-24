@@ -11,5 +11,6 @@ pub mod import;
 pub mod download;
 pub mod sync;
 pub mod update;
+pub mod launch;
 
 pub use manifest::{Loader, Pack, Lock, LockedMod, UnresolvedMod};

@@ -7,11 +7,12 @@
 //! Hashes every jar in <mods_dir>, identifies it via Modrinth, and writes a
 //! `pack.toml` + `pack.lock` into --out (default: current directory).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use launcher_core::import::import_mods_dir;
 use launcher_core::manifest::Loader;
 use launcher_core::modrinth::Client;
+use launcher_core::launch::{self, AuthSession, Host, LaunchOptions};
 use launcher_core::manifest::Pack;
 use launcher_core::sync::{self, ModStatus, SyncOptions};
 use launcher_core::update::{self, Change};
@@ -22,7 +23,8 @@ Usage:
   ember import <mods_dir> [--name NAME] [--game VERSION] [--loader LOADER] [--out DIR]
   ember sync   [--lock pack.lock] [--mods DIR] [--cache DIR] [--concurrency N] [--prune]
   ember update [--pack pack.toml] [--lock pack.lock] [--game VERSION] [--apply]
-       (--game bumps the pack to a new Minecraft version; default is dry-run)";
+  ember launch <version_id> [--mc DIR] [--name NAME] [--java PATH] [--max-mb N] [--run]
+       (default prints the command; --run actually starts the game offline)";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -32,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
         "import" => cmd_import(args).await,
         "sync" => cmd_sync(args).await,
         "update" => cmd_update(args).await,
+        "launch" => cmd_launch(args).await,
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -118,6 +121,117 @@ async fn cmd_sync(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     if !report.failures.is_empty() {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+fn default_mc_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".minecraft")
+}
+
+fn find_java(mc_dir: &Path, component: &str, host: &Host) -> PathBuf {
+    // Prefer Mojang's bundled runtime for this version's java component.
+    let candidate = mc_dir
+        .join("runtime")
+        .join(component)
+        .join(host.os_name)
+        .join(component)
+        .join("bin")
+        .join("java");
+    if candidate.exists() {
+        return candidate;
+    }
+    PathBuf::from("java") // fall back to PATH
+}
+
+async fn cmd_launch(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let mut version_id: Option<String> = None;
+    let mut mc_dir = default_mc_dir();
+    let mut name = "Player".to_string();
+    let mut java: Option<PathBuf> = None;
+    let mut max_mb = 4096u32;
+    let mut run = false;
+
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--mc" => mc_dir = PathBuf::from(args.next().unwrap_or_default()),
+            "--name" => name = args.next().unwrap_or(name),
+            "--java" => java = args.next().map(PathBuf::from),
+            "--max-mb" => max_mb = args.next().and_then(|s| s.parse().ok()).unwrap_or(max_mb),
+            "--run" => run = true,
+            other if version_id.is_none() => version_id = Some(other.to_string()),
+            other => {
+                eprintln!("unexpected argument: {other}\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+    let version_id = version_id.unwrap_or_else(|| {
+        eprintln!("error: <version_id> is required (e.g. fabric-loader-0.19.3-1.21.11)\n\n{USAGE}");
+        std::process::exit(2);
+    });
+
+    let host = Host::current();
+    let versions_dir = mc_dir.join("versions");
+    let resolved = launch::resolve(&versions_dir, &version_id, &host)?;
+
+    let java_path = java.unwrap_or_else(|| find_java(&mc_dir, &resolved.java_component, &host));
+    let natives_dir = mc_dir.join("bin").join(format!("ember-natives-{}", resolved.root_id));
+
+    eprintln!(
+        "Resolved {} (root {}, main {})",
+        resolved.id, resolved.root_id, resolved.main_class
+    );
+    eprintln!("  java:        {}", java_path.display());
+    eprintln!("  assetIndex:  {}", resolved.asset_index_id);
+
+    let cp = resolved.classpath(&mc_dir);
+    let missing = resolved.missing_classpath(&mc_dir);
+    eprintln!("  classpath:   {} entries, {} missing on disk", cp.len(), missing.len());
+    for m in &missing {
+        eprintln!("      MISSING: {}", m.display());
+    }
+
+    let auth = AuthSession::offline(&name);
+    let opts = LaunchOptions {
+        game_dir: mc_dir.clone(),
+        java_path: java_path.clone(),
+        min_mb: 512,
+        max_mb,
+        natives_dir: natives_dir.clone(),
+    };
+    let argv = resolved.build_command(&mc_dir, &host, &auth, &opts);
+
+    if !run {
+        println!("\n# Launch command (offline / dry run):");
+        println!("{} \\", java_path.display());
+        for a in &argv {
+            // Lightly quote args that contain spaces for readability.
+            if a.contains(' ') {
+                println!("  '{a}' \\");
+            } else {
+                println!("  {a} \\");
+            }
+        }
+        println!("\n({} total JVM+game args)", argv.len());
+        if !missing.is_empty() {
+            println!("\n⚠ {} classpath entries missing — run sync/install first.", missing.len());
+            std::process::exit(1);
+        }
+        println!("\nDry run. Re-run with --run to start the game (offline mode).");
+        return Ok(());
+    }
+
+    if !missing.is_empty() {
+        eprintln!("Refusing to launch: {} classpath entries missing.", missing.len());
+        std::process::exit(1);
+    }
+    std::fs::create_dir_all(&natives_dir)?;
+    eprintln!("\nLaunching (offline)...");
+    let status = std::process::Command::new(&java_path)
+        .args(&argv)
+        .current_dir(&mc_dir)
+        .status()?;
+    eprintln!("Game exited with {status}");
     Ok(())
 }
 
