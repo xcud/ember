@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use launcher_core::import::import_mods_dir;
 use launcher_core::manifest::Loader;
 use launcher_core::modrinth::Client;
+use launcher_core::auth::{self, Account};
 use launcher_core::launch::{self, AuthSession, Host, LaunchOptions};
 use launcher_core::manifest::Pack;
 use launcher_core::sync::{self, ModStatus, SyncOptions};
@@ -23,8 +24,10 @@ Usage:
   ember import <mods_dir> [--name NAME] [--game VERSION] [--loader LOADER] [--out DIR]
   ember sync   [--lock pack.lock] [--mods DIR] [--cache DIR] [--concurrency N] [--prune]
   ember update [--pack pack.toml] [--lock pack.lock] [--game VERSION] [--apply]
-  ember launch <version_id> [--mc DIR] [--name NAME] [--java PATH] [--max-mb N] [--run]
-       (default prints the command; --run actually starts the game offline)";
+  ember launch <version_id> [--mc DIR] [--name NAME] [--java PATH] [--max-mb N] [--run] [--offline]
+       (default prints the command; --run starts the game; uses your account unless --offline)
+  ember login    (sign in with your Microsoft account via device code)
+  ember whoami   (show the signed-in account)";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,6 +38,8 @@ async fn main() -> anyhow::Result<()> {
         "sync" => cmd_sync(args).await,
         "update" => cmd_update(args).await,
         "launch" => cmd_launch(args).await,
+        "login" => cmd_login().await,
+        "whoami" => cmd_whoami().await,
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -143,6 +148,41 @@ fn find_java(mc_dir: &Path, component: &str, host: &Host) -> PathBuf {
     PathBuf::from("java") // fall back to PATH
 }
 
+async fn cmd_login() -> anyhow::Result<()> {
+    let http = Client::new()?;
+    eprintln!("Signing in with Microsoft (Azure app {})...", auth::client_id());
+    let account = auth::login_interactive(http.http(), |dc| {
+        let url = &dc.verification_uri;
+        println!("\n  To sign in, open:  {url}");
+        println!("  and enter code:    {}\n", dc.user_code);
+        if let Some(msg) = &dc.message {
+            eprintln!("  ({msg})");
+        }
+        eprintln!("  Waiting for approval...");
+    })
+    .await?;
+    println!(
+        "\n✓ Signed in as {} ({})",
+        account.name, account.uuid
+    );
+    println!("  Saved to {}", auth::account_path().display());
+    Ok(())
+}
+
+async fn cmd_whoami() -> anyhow::Result<()> {
+    match Account::load() {
+        Some(a) => {
+            println!("{} ({})", a.name, a.uuid);
+            println!("  account file: {}", auth::account_path().display());
+        }
+        None => {
+            println!("Not signed in. Run `ember login`.");
+            std::process::exit(1);
+        }
+    }
+    Ok(())
+}
+
 async fn cmd_launch(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let mut version_id: Option<String> = None;
     let mut mc_dir = default_mc_dir();
@@ -150,6 +190,7 @@ async fn cmd_launch(mut args: impl Iterator<Item = String>) -> anyhow::Result<()
     let mut java: Option<PathBuf> = None;
     let mut max_mb = 4096u32;
     let mut run = false;
+    let mut offline = false;
 
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -158,6 +199,7 @@ async fn cmd_launch(mut args: impl Iterator<Item = String>) -> anyhow::Result<()
             "--java" => java = args.next().map(PathBuf::from),
             "--max-mb" => max_mb = args.next().and_then(|s| s.parse().ok()).unwrap_or(max_mb),
             "--run" => run = true,
+            "--offline" => offline = true,
             other if version_id.is_none() => version_id = Some(other.to_string()),
             other => {
                 eprintln!("unexpected argument: {other}\n\n{USAGE}");
@@ -191,7 +233,25 @@ async fn cmd_launch(mut args: impl Iterator<Item = String>) -> anyhow::Result<()
         eprintln!("      MISSING: {}", m.display());
     }
 
-    let auth = AuthSession::offline(&name);
+    // Prefer the signed-in account; fall back to offline.
+    let auth = if offline {
+        AuthSession::offline(&name)
+    } else if let Some(account) = Account::load() {
+        let http = Client::new()?;
+        match auth::ensure_session(http.http(), account).await {
+            Ok(session) => {
+                eprintln!("  account:     {} (online)", session.player_name);
+                session
+            }
+            Err(e) => {
+                eprintln!("  account:     refresh failed ({e}) — falling back to offline");
+                AuthSession::offline(&name)
+            }
+        }
+    } else {
+        eprintln!("  account:     none — offline mode (run `ember login` for multiplayer)");
+        AuthSession::offline(&name)
+    };
     let opts = LaunchOptions {
         game_dir: mc_dir.clone(),
         java_path: java_path.clone(),
