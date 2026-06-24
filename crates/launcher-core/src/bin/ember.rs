@@ -12,13 +12,17 @@ use std::path::PathBuf;
 use launcher_core::import::import_mods_dir;
 use launcher_core::manifest::Loader;
 use launcher_core::modrinth::Client;
+use launcher_core::manifest::Pack;
 use launcher_core::sync::{self, ModStatus, SyncOptions};
+use launcher_core::update::{self, Change};
 
 const USAGE: &str = "ember (first slice)
 
 Usage:
   ember import <mods_dir> [--name NAME] [--game VERSION] [--loader LOADER] [--out DIR]
-  ember sync  [--lock pack.lock] [--mods DIR] [--cache DIR] [--concurrency N] [--prune]";
+  ember sync   [--lock pack.lock] [--mods DIR] [--cache DIR] [--concurrency N] [--prune]
+  ember update [--pack pack.toml] [--lock pack.lock] [--game VERSION] [--apply]
+       (--game bumps the pack to a new Minecraft version; default is dry-run)";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
     match cmd.as_str() {
         "import" => cmd_import(args).await,
         "sync" => cmd_sync(args).await,
+        "update" => cmd_update(args).await,
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -113,6 +118,108 @@ async fn cmd_sync(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> 
     if !report.failures.is_empty() {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+async fn cmd_update(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let mut pack_path = PathBuf::from("pack.toml");
+    let mut lock_path = PathBuf::from("pack.lock");
+    let mut target_game: Option<String> = None;
+    let mut apply = false;
+
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--pack" => pack_path = PathBuf::from(args.next().unwrap_or_default()),
+            "--lock" => lock_path = PathBuf::from(args.next().unwrap_or_default()),
+            "--game" => target_game = args.next(),
+            "--apply" => apply = true,
+            other => {
+                eprintln!("unexpected argument: {other}\n\n{USAGE}");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let pack = Pack::load(&pack_path)?;
+    let old_lock = sync::load_lock(&lock_path).ok();
+    let client = Client::new()?;
+
+    match &target_game {
+        Some(g) => eprintln!("Bumping {} -> Minecraft {} ({})", pack.name, g, pack.loader),
+        None => eprintln!(
+            "Updating {} (Minecraft {} on {})",
+            pack.name, pack.game_version, pack.loader
+        ),
+    }
+
+    let plan = update::plan(&client, &pack, old_lock.as_ref(), target_game.clone(), 8).await?;
+
+    let mut incompatible = 0usize;
+    for u in &plan.updates {
+        match &u.change {
+            Change::Added => {
+                let v = u.locked.as_ref().unwrap();
+                println!("  [+ add ] {}  -> {}", u.slug, v.version_number);
+            }
+            Change::Updated { from } => {
+                let v = u.locked.as_ref().unwrap();
+                println!("  [update] {}  {}  ->  {}", u.slug, from, v.version_number);
+            }
+            Change::Unchanged => {
+                let v = u.locked.as_ref().unwrap();
+                println!("  [  ok  ] {}  {}", u.slug, v.version_number);
+            }
+            Change::Incompatible => {
+                incompatible += 1;
+                println!("  [ !!   ] {}  — no build for {}", u.slug, plan.game_version);
+            }
+        }
+    }
+    for slug in &plan.removed {
+        println!("  [remove] {slug}  — no longer in pack.toml");
+    }
+
+    let updated = plan
+        .updates
+        .iter()
+        .filter(|u| matches!(u.change, Change::Updated { .. }))
+        .count();
+    let added = plan
+        .updates
+        .iter()
+        .filter(|u| matches!(u.change, Change::Added))
+        .count();
+    println!(
+        "\n{added} added, {updated} updated, {incompatible} incompatible, {} removed",
+        plan.removed.len()
+    );
+
+    if incompatible > 0 {
+        println!(
+            "  ⚠ {incompatible} mod(s) have no {} build yet — excluded from the new lock.",
+            plan.game_version
+        );
+    }
+
+    if !apply {
+        if plan.changed() {
+            println!("\nDry run. Re-run with --apply to write {}.", lock_path.display());
+        } else {
+            println!("\nAlready up to date. Nothing to write.");
+        }
+        return Ok(());
+    }
+
+    // Apply: write the new lock, and on a bump, update pack.toml's game version.
+    plan.new_lock().write(&lock_path)?;
+    println!("\nWrote {}", lock_path.display());
+    if let Some(g) = &target_game {
+        let mut pack = pack;
+        pack.game_version = g.clone();
+        pack.write(&pack_path)?;
+        println!("Updated {} to game_version = \"{g}\"", pack_path.display());
+    }
+    println!("Run `ember sync` to realize the new lock.");
     Ok(())
 }
 

@@ -60,6 +60,9 @@ impl Pack {
         std::fs::write(path, self.to_toml()?)?;
         Ok(())
     }
+    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Ok(toml::from_str(&std::fs::read_to_string(path)?)?)
+    }
 }
 
 /// One resolved mod in `pack.lock`.

@@ -30,7 +30,20 @@ pub struct Version {
     pub loaders: Vec<String>,
     #[serde(default)]
     pub game_versions: Vec<String>,
+    /// ISO-8601 UTC; lexical order is chronological order.
+    #[serde(default)]
+    pub date_published: String,
+    /// "release" | "beta" | "alpha".
+    #[serde(default)]
+    pub version_type: String,
     pub files: Vec<VersionFile>,
+}
+
+impl Version {
+    /// The file to install: the one flagged primary, else the first.
+    pub fn primary_file(&self) -> Option<&VersionFile> {
+        self.files.iter().find(|f| f.primary).or_else(|| self.files.first())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +101,29 @@ impl Client {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    /// List a project's versions, filtered to one loader and game version.
+    /// Returned newest-first (by publish date).
+    pub async fn project_versions(
+        &self,
+        slug: &str,
+        loader: &str,
+        game_version: &str,
+    ) -> anyhow::Result<Vec<Version>> {
+        let loaders = serde_json::to_string(&[loader])?;
+        let games = serde_json::to_string(&[game_version])?;
+        let resp = self
+            .http
+            .get(format!("{API}/project/{slug}/version"))
+            .query(&[("loaders", loaders), ("game_versions", games)])
+            .send()
+            .await?
+            .error_for_status()?;
+        let mut versions: Vec<Version> = resp.json().await?;
+        // Newest first; lexical sort of ISO timestamps is chronological.
+        versions.sort_by(|a, b| b.date_published.cmp(&a.date_published));
+        Ok(versions)
     }
 
     /// Fetch project metadata (we mainly want the human-readable `slug`).
