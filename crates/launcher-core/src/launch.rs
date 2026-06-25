@@ -114,7 +114,7 @@ fn read_version_json(versions_dir: &Path, id: &str) -> anyhow::Result<Value> {
 /// Does this rule set allow inclusion on `host`? Rules with a `features` guard
 /// (demo mode, custom resolution, …) are treated as not-matching, so their
 /// optional args are dropped.
-fn rules_allow(rules: &Value, host: &Host) -> bool {
+pub(crate) fn rules_allow(rules: &Value, host: &Host) -> bool {
     let Some(rules) = rules.as_array() else {
         return true;
     };
@@ -149,7 +149,7 @@ fn rules_allow(rules: &Value, host: &Host) -> bool {
 }
 
 /// `group:artifact:version[:classifier]` -> relative jar path under `libraries/`.
-fn maven_to_path(name: &str) -> Option<String> {
+pub(crate) fn maven_to_path(name: &str) -> Option<String> {
     let parts: Vec<&str> = name.split(':').collect();
     if parts.len() < 3 {
         return None;

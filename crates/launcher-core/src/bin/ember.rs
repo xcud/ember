@@ -13,6 +13,7 @@ use launcher_core::import::import_mods_dir;
 use launcher_core::manifest::Loader;
 use launcher_core::modrinth::Client;
 use launcher_core::auth::{self, Account};
+use launcher_core::install;
 use launcher_core::instance::Instance;
 use launcher_core::launch::{self, AuthSession, Host, LaunchOptions};
 use launcher_core::modpack;
@@ -34,7 +35,9 @@ Usage:
   ember instance new <name> --version <id> [--mc DIR] [--max-mb N]
   ember instance clone <name> <new_name>
   ember instance delete <name>
-  ember modpack import <file.mrpack> [--name NAME] [--mc DIR] [--max-mb N]";
+  ember modpack import <file.mrpack> [--name NAME] [--mc DIR] [--max-mb N]
+  ember install <mc_version> [--fabric <loader_version>] [--mc DIR]
+       (download a vanilla version, and optionally a Fabric loader, into the shared install)";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -49,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
         "whoami" => cmd_whoami().await,
         "instance" => cmd_instance(args).await,
         "modpack" => cmd_modpack(args).await,
+        "install" => cmd_install(args).await,
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -155,6 +159,69 @@ fn find_java(mc_dir: &Path, component: &str, host: &Host) -> PathBuf {
         return candidate;
     }
     PathBuf::from("java") // fall back to PATH
+}
+
+async fn cmd_install(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let mut mc_version: Option<String> = None;
+    let mut fabric: Option<String> = None;
+    let mut mc = default_mc_dir();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--fabric" => fabric = args.next(),
+            "--mc" => mc = PathBuf::from(args.next().unwrap_or_default()),
+            other if mc_version.is_none() => mc_version = Some(other.to_string()),
+            _ => {}
+        }
+    }
+    let mc_version = mc_version.unwrap_or_else(|| {
+        eprintln!("usage: ember install <mc_version> [--fabric <loader_version>] [--mc DIR]");
+        std::process::exit(2);
+    });
+
+    let host = Host::current();
+    let cache_dir = default_cache_dir();
+    // Throttled progress line per phase.
+    let progress: std::sync::Arc<dyn Fn(&str, usize, usize) + Send + Sync> =
+        std::sync::Arc::new(|phase: &str, n: usize, total: usize| {
+            if n == total || n % 25 == 0 {
+                eprint!("\r  {phase}: {n}/{total}    ");
+                use std::io::Write;
+                let _ = std::io::stderr().flush();
+                if n == total {
+                    eprintln!();
+                }
+            }
+        });
+
+    let report = match &fabric {
+        Some(lv) => {
+            eprintln!("Installing Fabric {lv} for Minecraft {mc_version} into {} ...", mc.display());
+            install::install_fabric(&mc, &cache_dir, &mc_version, lv, &host, 16, progress).await?
+        }
+        None => {
+            eprintln!("Installing Minecraft {mc_version} into {} ...", mc.display());
+            install::install_vanilla(&mc, &cache_dir, &mc_version, &host, 16, progress).await?
+        }
+    };
+
+    println!(
+        "\nInstalled {}: {} downloaded, {} already present{}",
+        report.version_id,
+        report.downloaded,
+        report.skipped,
+        if report.failures.is_empty() {
+            String::new()
+        } else {
+            format!(", {} FAILED", report.failures.len())
+        }
+    );
+    for f in report.failures.iter().take(10) {
+        println!("  FAIL: {f}");
+    }
+    if report.failures.is_empty() {
+        println!("Ready to launch: ember launch {} --mc {}", report.version_id, mc.display());
+    }
+    Ok(())
 }
 
 async fn cmd_instance(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
