@@ -118,6 +118,23 @@ impl Instance {
         Instance::list().into_iter().find(|i| i.config.name == name)
     }
 
+    /// Everything to show in a launcher: the synthesized `main` (the shared
+    /// `~/.minecraft`, if present) first, then all managed instances. This is
+    /// what UIs should call so `main` is always visible, not just when no
+    /// managed instances exist.
+    pub fn all() -> Vec<Instance> {
+        let mut out = Vec::new();
+        if let Some(main) = Instance::detect_main() {
+            out.push(main);
+        }
+        for i in Instance::list() {
+            if i.config.name != "main" {
+                out.push(i);
+            }
+        }
+        out
+    }
+
     /// Create a new, isolated instance under [`instances_root`].
     pub fn create(name: &str, version_id: &str, mc_home: PathBuf, max_mb: u32) -> anyhow::Result<Instance> {
         let dir = instances_root().join(name);
@@ -146,7 +163,7 @@ impl Instance {
     /// no instances have been created yet.
     pub fn detect_main() -> Option<Instance> {
         let mc_home = default_mc_home();
-        let version_id = newest_fabric_version(&mc_home)?;
+        let version_id = main_version_id(&mc_home)?;
         Some(Instance {
             config: InstanceConfig {
                 name: "main".to_string(),
@@ -285,6 +302,42 @@ mod tests {
         assert!(argv.iter().any(|a| a.contains("KnotClient")), "fabric main class present");
         assert!(argv.contains(&"--gameDir".to_string()));
     }
+}
+
+fn version_installed(mc_home: &Path, id: &str) -> bool {
+    mc_home.join("versions").join(id).join(format!("{id}.json")).exists()
+}
+
+/// Which version the "main" instance should launch. Prefers the official
+/// launcher's most-recently-used profile (authoritative — survives ember
+/// installing other versions), falling back to the newest installed Fabric.
+fn main_version_id(mc_home: &Path) -> Option<String> {
+    if let Some(id) = last_used_version(mc_home) {
+        return Some(id);
+    }
+    newest_fabric_version(mc_home)
+}
+
+/// Most-recently-used profile in `launcher_profiles.json` whose version is
+/// actually installed.
+fn last_used_version(mc_home: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(mc_home.join("launcher_profiles.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let profiles = v.get("profiles")?.as_object()?;
+    let mut candidates: Vec<(String, String)> = profiles
+        .values()
+        .filter_map(|p| {
+            let ver = p.get("lastVersionId")?.as_str()?.to_string();
+            let last_used = p.get("lastUsed").and_then(|l| l.as_str()).unwrap_or("").to_string();
+            Some((last_used, ver))
+        })
+        .collect();
+    // Most recent first; lexical sort of ISO timestamps is chronological.
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates
+        .into_iter()
+        .map(|(_, ver)| ver)
+        .find(|ver| version_installed(mc_home, ver))
 }
 
 /// Newest (by mtime) `fabric-loader-*` version installed under `mc_home`.

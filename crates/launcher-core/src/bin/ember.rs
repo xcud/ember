@@ -228,12 +228,7 @@ async fn cmd_instance(mut args: impl Iterator<Item = String>) -> anyhow::Result<
     let sub = args.next().unwrap_or_default();
     match sub.as_str() {
         "list" => {
-            let mut instances = Instance::list();
-            if instances.is_empty() {
-                if let Some(main) = Instance::detect_main() {
-                    instances.push(main);
-                }
-            }
+            let instances = Instance::all();
             if instances.is_empty() {
                 println!("No instances. Create one with `ember instance new` or `ember modpack import`.");
             }

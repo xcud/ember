@@ -72,13 +72,7 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        let mut instances = Instance::list();
-        if instances.is_empty() {
-            if let Some(main) = Instance::detect_main() {
-                instances.push(main);
-            }
-        }
-        self.instances = instances;
+        self.instances = Instance::all();
         if self.selected >= self.instances.len() {
             self.selected = self.instances.len().saturating_sub(1);
         }
