@@ -144,11 +144,12 @@ impl App {
         match modal {
             Modal::CloneName if self.selected_instance().is_none() => return,
             Modal::ConfirmDelete => match self.selected_instance() {
-                Some(i) if i.is_managed() => {}
-                Some(_) => {
-                    self.status = "Can't delete the shared 'main' instance.".into();
+                Some(i) if i.config.linked => {
+                    self.status = "Can't delete a linked instance (it points at your real install).".into();
                     return;
                 }
+                Some(i) if i.is_managed() => {}
+                Some(_) => return,
                 None => return,
             },
             _ => {}
@@ -255,7 +256,7 @@ fn ui(f: &mut Frame, app: &App) {
         .map(|(idx, i)| {
             let running = idx == app.selected && app.game_running();
             let dot = if running { "● " } else { "  " };
-            let tag = if i.is_managed() { "" } else { " (shared)" };
+            let tag = if i.config.linked { " (linked)" } else { "" };
             ListItem::new(format!("{dot}{}{}", i.config.name, tag))
         })
         .collect();

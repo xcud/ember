@@ -233,8 +233,8 @@ async fn cmd_instance(mut args: impl Iterator<Item = String>) -> anyhow::Result<
                 println!("No instances. Create one with `ember instance new` or `ember modpack import`.");
             }
             for i in &instances {
-                let managed = if i.is_managed() { "" } else { "  (shared)" };
-                println!("{:<20} {}{}", i.config.name, i.config.version_id, managed);
+                let tag = if i.config.linked { "  (linked)" } else { "" };
+                println!("{:<20} {}{}", i.config.name, i.config.version_id, tag);
             }
         }
         "new" => {
@@ -261,7 +261,6 @@ async fn cmd_instance(mut args: impl Iterator<Item = String>) -> anyhow::Result<
             let name = args.next().unwrap_or_default();
             let new_name = args.next().unwrap_or_default();
             let src = Instance::find(&name)
-                .or_else(|| Instance::detect_main().filter(|m| m.config.name == name))
                 .ok_or_else(|| anyhow::anyhow!("no instance named '{name}'"))?;
             let inst = src.clone_to(&new_name)?;
             println!("Cloned '{name}' -> '{}' ({})", inst.config.name, inst.dir.display());

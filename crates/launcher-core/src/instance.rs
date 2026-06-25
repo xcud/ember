@@ -34,6 +34,11 @@ pub struct InstanceConfig {
     pub game_dir: PathBuf,
     #[serde(default = "default_max_mb")]
     pub max_mb: u32,
+    /// A linked instance points `game_dir` at an existing external install
+    /// (e.g. `main` -> `~/.minecraft`). The instance folder is just a pointer;
+    /// its `game_dir` lives outside and is never deleted with the instance.
+    #[serde(default)]
+    pub linked: bool,
     #[serde(default)]
     pub last_played: Option<u64>,
 }
@@ -113,25 +118,22 @@ impl Instance {
         out
     }
 
-    /// Find a managed instance by name.
+    /// Find an instance by name (including the linked `main`).
     pub fn find(name: &str) -> Option<Instance> {
-        Instance::list().into_iter().find(|i| i.config.name == name)
+        Instance::all().into_iter().find(|i| i.config.name == name)
     }
 
-    /// Everything to show in a launcher: the synthesized `main` (the shared
-    /// `~/.minecraft`, if present) first, then all managed instances. This is
-    /// what UIs should call so `main` is always visible, not just when no
-    /// managed instances exist.
+    /// Everything to show in a launcher: ensures the linked `main` exists, then
+    /// lists all instances with linked ones first, then alphabetical.
     pub fn all() -> Vec<Instance> {
-        let mut out = Vec::new();
-        if let Some(main) = Instance::detect_main() {
-            out.push(main);
-        }
-        for i in Instance::list() {
-            if i.config.name != "main" {
-                out.push(i);
-            }
-        }
+        let _ = Instance::ensure_main();
+        let mut out = Instance::list();
+        out.sort_by(|a, b| {
+            b.config
+                .linked
+                .cmp(&a.config.linked)
+                .then(a.config.name.to_lowercase().cmp(&b.config.name.to_lowercase()))
+        });
         out
     }
 
@@ -150,6 +152,7 @@ impl Instance {
                 mc_home,
                 game_dir,
                 max_mb,
+                linked: false,
                 last_played: None,
             },
             dir,
@@ -158,23 +161,45 @@ impl Instance {
         Ok(inst)
     }
 
-    /// Synthesize a "main" instance pointing at an existing shared install,
-    /// using its newest installed Fabric version. Used to bootstrap the UI when
-    /// no instances have been created yet.
-    pub fn detect_main() -> Option<Instance> {
+    /// Ensure a linked `main` instance exists, pointing at the shared
+    /// `~/.minecraft` install. Materialized as a real instance folder (a pointer
+    /// `instance.toml`; the game dir lives outside it). Its launch version is
+    /// kept in sync with the official launcher's most-recently-used version.
+    /// Returns `None` if there's no usable install to link.
+    pub fn ensure_main() -> Option<Instance> {
         let mc_home = default_mc_home();
         let version_id = main_version_id(&mc_home)?;
-        Some(Instance {
+        let dir = instances_root().join("main");
+
+        if let Ok(mut inst) = Instance::load(&dir) {
+            // Keep the linked version fresh with the official launcher.
+            if inst.config.version_id != version_id {
+                inst.config.version_id = version_id;
+                let _ = inst.save();
+            }
+            return Some(inst);
+        }
+
+        std::fs::create_dir_all(&dir).ok()?;
+        let inst = Instance {
             config: InstanceConfig {
                 name: "main".to_string(),
                 version_id,
                 mc_home: mc_home.clone(),
-                game_dir: mc_home.clone(),
+                game_dir: mc_home,
                 max_mb: 4096,
+                linked: true,
                 last_played: None,
             },
-            dir: mc_home,
-        })
+            dir,
+        };
+        inst.save().ok()?;
+        Some(inst)
+    }
+
+    /// Back-compat alias; materializes the linked `main` instance.
+    pub fn detect_main() -> Option<Instance> {
+        Self::ensure_main()
     }
 
     /// Build the launch command (java path + argv) for this instance.
@@ -244,6 +269,7 @@ impl Instance {
                 mc_home: self.config.mc_home.clone(),
                 game_dir,
                 max_mb: self.config.max_mb,
+                linked: false,
                 last_played: None,
             },
             dir,
@@ -255,6 +281,13 @@ impl Instance {
     /// Delete this instance. Refuses to touch anything outside [`instances_root`]
     /// (so it can never delete a shared install like `~/.minecraft`).
     pub fn delete(self) -> anyhow::Result<()> {
+        if self.config.linked {
+            anyhow::bail!(
+                "'{}' is a linked instance pointing at {} — delete refused (your install is untouched). Unlink instead if you want it gone.",
+                self.config.name,
+                self.config.game_dir.display()
+            );
+        }
         if !self.is_managed() {
             anyhow::bail!(
                 "refusing to delete '{}': not a managed instance ({})",
