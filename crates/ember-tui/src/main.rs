@@ -162,12 +162,16 @@ impl App {
         self.mod_state.select(Some(i.saturating_sub(1)));
     }
 
-    fn console_scroll_by(&mut self, delta: isize) {
-        let new = (self.console_scroll as isize + delta).max(0) as usize;
-        self.console_scroll = new.min(2000);
+    fn set_console_scroll(&mut self, n: usize) {
+        self.console_scroll = n.min(2000);
         if let Some(c) = &self.console {
             c.set_scrollback(self.console_scroll);
         }
+    }
+
+    fn console_scroll_by(&mut self, delta: isize) {
+        let new = (self.console_scroll as isize + delta).max(0) as usize;
+        self.set_console_scroll(new);
     }
 
     fn auth_session(name: &str) -> AuthSession {
@@ -545,6 +549,26 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                     }
                     KeyCode::PageDown => app.console_scroll_by(-10),
                     KeyCode::PageUp => app.console_scroll_by(10),
+                    KeyCode::Home => {
+                        if right_console {
+                            app.set_console_scroll(2000); // oldest; vt100 clamps to history
+                        } else if right_mods && !app.mods.is_empty() {
+                            app.mod_state.select(Some(0));
+                        } else if !app.instances.is_empty() {
+                            app.selected = 0;
+                            app.refresh_mods();
+                        }
+                    }
+                    KeyCode::End => {
+                        if right_console {
+                            app.set_console_scroll(0); // live bottom
+                        } else if right_mods && !app.mods.is_empty() {
+                            app.mod_state.select(Some(app.mods.len() - 1));
+                        } else if !app.instances.is_empty() {
+                            app.selected = app.instances.len() - 1;
+                            app.refresh_mods();
+                        }
+                    }
                     KeyCode::Char('m') => {
                         app.right_view = RightView::Mods;
                         app.focus = Focus::Right;
