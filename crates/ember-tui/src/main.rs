@@ -6,8 +6,10 @@
 //! console resizes to its pane and scrolls. Instance management: new, clone,
 //! delete, import `.mrpack`.
 
+use std::collections::HashSet;
 use std::io::Stdout;
 use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -93,6 +95,10 @@ struct App {
     results: Vec<SearchHit>,
     result_state: ListState,
     picking: bool,
+    // Background metadata enrichment (resolve + describe an instance's mods).
+    enrich_tx: mpsc::Sender<String>,
+    enrich_rx: mpsc::Receiver<String>,
+    enrich_started: HashSet<String>,
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -166,6 +172,7 @@ fn list_mods(inst: &Instance) -> Vec<ModRow> {
 
 impl App {
     fn new() -> Self {
+        let (enrich_tx, enrich_rx) = mpsc::channel();
         let mut app = App {
             instances: Vec::new(),
             selected: 0,
@@ -181,6 +188,9 @@ impl App {
             results: Vec::new(),
             result_state: ListState::default(),
             picking: false,
+            enrich_tx,
+            enrich_rx,
+            enrich_started: HashSet::new(),
         };
         app.refresh();
         app.status =
@@ -203,6 +213,29 @@ impl App {
         } else {
             self.mod_state.select(Some(0));
         }
+        self.maybe_enrich();
+    }
+
+    /// Kick off background metadata enrichment for the selected instance, once.
+    /// Resolves its mods to a real pack (with titles/descriptions) off-thread,
+    /// then the UI re-reads the enriched lock when the worker signals done.
+    fn maybe_enrich(&mut self) {
+        let Some(inst) = self.selected_instance().cloned() else { return };
+        // Skip if there's nothing to enrich or we've already started it.
+        if inst.mods_dir().read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
+            return;
+        }
+        let key = inst.config.name.clone();
+        if !self.enrich_started.insert(key.clone()) {
+            return;
+        }
+        let tx = self.enrich_tx.clone();
+        std::thread::spawn(move || {
+            if let (Ok(client), Ok(rt)) = (Client::new(), tokio::runtime::Runtime::new()) {
+                let _ = rt.block_on(manage::ensure_pack(&client, &inst));
+            }
+            let _ = tx.send(key);
+        });
     }
 
     fn selected_instance(&self) -> Option<&Instance> {
@@ -766,6 +799,15 @@ fn ui(f: &mut Frame, app: &mut App) {
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
     let mut app = App::new();
     loop {
+        // Apply any completed background enrichment for the visible instance.
+        while let Ok(name) = app.enrich_rx.try_recv() {
+            if app.selected_instance().map(|i| i.config.name == name).unwrap_or(false) {
+                let sel = app.mod_state.selected();
+                app.mods = app.instances.get(app.selected).map(list_mods).unwrap_or_default();
+                app.mod_state.select(sel.filter(|i| *i < app.mods.len()).or(Some(0)).filter(|_| !app.mods.is_empty()));
+            }
+        }
+
         if let Ok(size) = terminal.size() {
             app.fit_console(size);
         }
