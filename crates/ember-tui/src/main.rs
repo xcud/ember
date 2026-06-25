@@ -1009,10 +1009,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                             app.right_view = app.right_view.prev();
                         } else if right {
                             app.right_view = app.right_view.cycle();
+                        } else if up || key.code == KeyCode::Esc {
+                            app.focus = Focus::List; // ↑/Esc from the top strip returns to the sidebar
                         } else if down || enter {
                             app.descend();
-                        } else if key.code == KeyCode::Esc {
-                            app.focus = Focus::List;
                         } else {
                             app.handle_command(key.code);
                         }
