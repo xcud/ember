@@ -175,15 +175,37 @@ async fn cmd_mod(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
     let client = Client::new()?;
     let cache_dir = default_cache_dir();
 
+    // Extract an optional `--type mod|resourcepack|shader` flag from `rest`.
+    let mut content_type = launcher_core::manifest::ContentType::Mod;
+    let mut terms: Vec<String> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--type" => {
+                content_type = match it.next().map(|s| s.as_str()) {
+                    Some("resourcepack") | Some("rp") => launcher_core::manifest::ContentType::ResourcePack,
+                    Some("shader") => launcher_core::manifest::ContentType::Shader,
+                    _ => launcher_core::manifest::ContentType::Mod,
+                };
+            }
+            other => terms.push(other.to_string()),
+        }
+    }
+
     match sub.as_str() {
         "add" => {
-            let query = rest.join(" ");
+            let query = terms.join(" ");
             if query.is_empty() {
-                eprintln!("usage: ember mod add <instance> <query>");
+                eprintln!("usage: ember mod add <instance> <query> [--type mod|resourcepack|shader]");
                 std::process::exit(2);
             }
-            eprintln!("Searching Modrinth for '{query}' ...");
-            let report = manage::add_mod(&client, &cache_dir, &instance, &query).await?;
+            eprintln!("Searching Modrinth ({}) for '{query}' ...", content_type.label());
+            let hits = manage::search_content(&client, &instance, content_type, &query).await?;
+            let Some(top) = hits.into_iter().next() else {
+                eprintln!("no results for '{query}'");
+                std::process::exit(1);
+            };
+            let report = manage::add_content(&client, &cache_dir, &instance, content_type, &top.slug).await?;
             for s in &report.installed {
                 println!("  [+ add ] {s}");
             }
@@ -193,15 +215,15 @@ async fn cmd_mod(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
             for s in &report.incompatible {
                 println!("  [ !!   ] {s} — no compatible build");
             }
-            println!("\n{} installed (incl. dependencies)", report.installed.len());
+            println!("\n{} installed", report.installed.len());
         }
         "remove" => {
-            let filename = rest.first().cloned().unwrap_or_default();
+            let filename = terms.first().cloned().unwrap_or_default();
             if filename.is_empty() {
-                eprintln!("usage: ember mod remove <instance> <filename.jar>");
+                eprintln!("usage: ember mod remove <instance> <filename> [--type ...]");
                 std::process::exit(2);
             }
-            manage::remove_mod(&instance, &filename)?;
+            manage::remove_content(&instance, content_type, &filename)?;
             println!("Removed {filename} from '{inst_name}'");
         }
         "update" => {

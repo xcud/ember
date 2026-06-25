@@ -139,18 +139,21 @@ impl Client {
         Ok(resp.json().await?)
     }
 
-    /// Search for mods compatible with a loader + game version.
-    pub async fn search(
+    /// Search for content of a given project type, optionally constrained to
+    /// loader categories, for a game version.
+    pub async fn search_typed(
         &self,
         query: &str,
-        loader: &str,
+        project_type: &str,
+        categories: &[String],
         game_version: &str,
     ) -> anyhow::Result<Vec<SearchHit>> {
-        let facets = serde_json::to_string(&[
-            vec!["project_type:mod".to_string()],
-            vec![format!("categories:{loader}")],
-            vec![format!("versions:{game_version}")],
-        ])?;
+        let mut facets: Vec<Vec<String>> = vec![vec![format!("project_type:{project_type}")]];
+        for c in categories {
+            facets.push(vec![format!("categories:{c}")]);
+        }
+        facets.push(vec![format!("versions:{game_version}")]);
+        let facets = serde_json::to_string(&facets)?;
         let resp = self
             .http
             .get(format!("{API}/search"))
@@ -163,14 +166,24 @@ impl Client {
     }
 
     /// List a project's versions, filtered to one loader and game version.
-    /// Returned newest-first (by publish date).
     pub async fn project_versions(
         &self,
         slug: &str,
         loader: &str,
         game_version: &str,
     ) -> anyhow::Result<Vec<Version>> {
-        let loaders = serde_json::to_string(&[loader])?;
+        self.project_versions_loaders(slug, &[loader.to_string()], game_version).await
+    }
+
+    /// List a project's versions, filtered to any of several loaders and a game
+    /// version. Returned newest-first (by publish date).
+    pub async fn project_versions_loaders(
+        &self,
+        slug: &str,
+        loaders: &[String],
+        game_version: &str,
+    ) -> anyhow::Result<Vec<Version>> {
+        let loaders = serde_json::to_string(loaders)?;
         let games = serde_json::to_string(&[game_version])?;
         let resp = self
             .http

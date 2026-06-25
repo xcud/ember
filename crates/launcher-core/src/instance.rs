@@ -89,6 +89,13 @@ impl Instance {
         self.config.game_dir.join("mods")
     }
 
+    /// The game-dir folder for a content type, created if missing.
+    pub fn content_dir(&self, content_type: crate::manifest::ContentType) -> PathBuf {
+        let d = self.config.game_dir.join(content_type.dir_name());
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
     pub fn load(dir: &Path) -> anyhow::Result<Instance> {
         let text = std::fs::read_to_string(Self::config_path(dir))?;
         let config: InstanceConfig = toml::from_str(&text)?;

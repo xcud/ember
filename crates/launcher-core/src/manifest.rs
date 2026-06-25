@@ -39,6 +39,66 @@ impl fmt::Display for Loader {
     }
 }
 
+/// A kind of installable content. Each lives in its own game-dir folder and is
+/// a distinct Modrinth project type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentType {
+    Mod,
+    ResourcePack,
+    Shader,
+}
+
+impl ContentType {
+    pub const ALL: [ContentType; 3] =
+        [ContentType::Mod, ContentType::ResourcePack, ContentType::Shader];
+
+    /// Modrinth `project_type` facet value.
+    pub fn project_type(self) -> &'static str {
+        match self {
+            ContentType::Mod => "mod",
+            ContentType::ResourcePack => "resourcepack",
+            ContentType::Shader => "shader",
+        }
+    }
+
+    /// Game-directory subfolder this content installs into.
+    pub fn dir_name(self) -> &'static str {
+        match self {
+            ContentType::Mod => "mods",
+            ContentType::ResourcePack => "resourcepacks",
+            ContentType::Shader => "shaderpacks",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ContentType::Mod => "Mods",
+            ContentType::ResourcePack => "Resource Packs",
+            ContentType::Shader => "Shaders",
+        }
+    }
+
+    /// Loader values to filter versions by. Resource packs use "minecraft";
+    /// shaders use the shader loaders; mods use the instance's mod loader.
+    pub fn version_loaders(self, mod_loader: Loader) -> Vec<String> {
+        match self {
+            ContentType::Mod => vec![mod_loader.modrinth_id().to_string()],
+            ContentType::ResourcePack => vec!["minecraft".to_string()],
+            ContentType::Shader => {
+                vec!["iris".to_string(), "optifine".to_string(), "canvas".to_string()]
+            }
+        }
+    }
+
+    /// Extra `categories:` facets for search (only mods filter by loader).
+    pub fn search_categories(self, mod_loader: Loader) -> Vec<String> {
+        match self {
+            ContentType::Mod => vec![mod_loader.modrinth_id().to_string()],
+            _ => Vec::new(),
+        }
+    }
+}
+
 /// `pack.toml` — the human-authored manifest.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pack {

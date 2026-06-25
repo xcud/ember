@@ -23,6 +23,7 @@ use launcher_core::auth::Account;
 use launcher_core::instance::Instance;
 use launcher_core::launch::{AuthSession, Host};
 use launcher_core::manage;
+use launcher_core::manifest::ContentType;
 use launcher_core::modpack;
 use launcher_core::modrinth::{Client, SearchHit};
 
@@ -82,6 +83,7 @@ struct ModRow {
 struct App {
     instances: Vec<Instance>,
     selected: usize,
+    content_type: ContentType,
     mods: Vec<ModRow>,
     mod_state: ListState,
     console: Option<PtySession>,
@@ -132,6 +134,43 @@ fn human_count(n: u64) -> String {
     }
 }
 
+fn content_next(ct: ContentType) -> ContentType {
+    match ct {
+        ContentType::Mod => ContentType::ResourcePack,
+        ContentType::ResourcePack => ContentType::Shader,
+        ContentType::Shader => ContentType::Mod,
+    }
+}
+fn content_prev(ct: ContentType) -> ContentType {
+    match ct {
+        ContentType::Mod => ContentType::Shader,
+        ContentType::ResourcePack => ContentType::Mod,
+        ContentType::Shader => ContentType::ResourcePack,
+    }
+}
+
+/// Rows for the given content type. Mods are enriched from the lock; resource
+/// packs and shaders are listed (as zips) straight from their folder.
+fn list_content(inst: &Instance, ct: ContentType) -> Vec<ModRow> {
+    if ct == ContentType::Mod {
+        return list_mods(inst);
+    }
+    let dir = inst.config.game_dir.join(ct.dir_name());
+    let mut rows = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let filename = e.file_name().to_string_lossy().into_owned();
+            if !(filename.ends_with(".zip") || filename.ends_with(".jar")) {
+                continue;
+            }
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            rows.push(ModRow { name: filename.clone(), version: String::new(), filename, size, description: String::new() });
+        }
+    }
+    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows
+}
+
 /// Build the mod rows for an instance: jars on disk, enriched from the lock.
 fn list_mods(inst: &Instance) -> Vec<ModRow> {
     use std::collections::HashMap;
@@ -176,6 +215,7 @@ impl App {
         let mut app = App {
             instances: Vec::new(),
             selected: 0,
+            content_type: ContentType::Mod,
             mods: Vec::new(),
             mod_state: ListState::default(),
             console: None,
@@ -194,7 +234,7 @@ impl App {
         };
         app.refresh();
         app.status =
-            "Tab/←→ focus · Esc back · 1/2/3 tabs · p play · a add · r remove · u update · n/c/d/i instance · q quit".into();
+            "Tab/←→ focus · 1/2/3 tabs · [ ] content type · p play · a add · r remove · u update · q quit".into();
         app
     }
 
@@ -207,7 +247,8 @@ impl App {
     }
 
     fn refresh_mods(&mut self) {
-        self.mods = self.instances.get(self.selected).map(list_mods).unwrap_or_default();
+        let ct = self.content_type;
+        self.mods = self.instances.get(self.selected).map(|i| list_content(i, ct)).unwrap_or_default();
         if self.mods.is_empty() {
             self.mod_state.select(None);
         } else {
@@ -220,6 +261,10 @@ impl App {
     /// Resolves its mods to a real pack (with titles/descriptions) off-thread,
     /// then the UI re-reads the enriched lock when the worker signals done.
     fn maybe_enrich(&mut self) {
+        // Only mods carry lock metadata; resource packs/shaders are folder-listed.
+        if self.content_type != ContentType::Mod {
+            return;
+        }
         let Some(inst) = self.selected_instance().cloned() else { return };
         // Skip if there's nothing to enrich or we've already started it.
         if inst.mods_dir().read_dir().map(|mut d| d.next().is_none()).unwrap_or(true) {
@@ -429,9 +474,9 @@ impl App {
         let inst = self.selected_instance().cloned().ok_or_else(|| anyhow::anyhow!("no instance selected"))?;
         let client = Client::new()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let hits = rt.block_on(manage::search(&client, &inst, &query))?;
+        let hits = rt.block_on(manage::search_content(&client, &inst, self.content_type, &query))?;
         if hits.is_empty() {
-            return Ok(format!("No results for '{query}'"));
+            return Ok(format!("No {} results for '{query}'", self.content_type.label()));
         }
         let n = hits.len();
         self.results = hits;
@@ -464,10 +509,11 @@ impl App {
         self.picking = false;
         self.results.clear();
         self.status = format!("Installing {} ...", hit.title);
+        let ct = self.content_type;
         let run = (|| -> anyhow::Result<manage::AddReport> {
             let client = Client::new()?;
             let rt = tokio::runtime::Runtime::new()?;
-            Ok(rt.block_on(manage::add_project(&client, &default_cache_dir(), &inst, &hit.slug))?)
+            Ok(rt.block_on(manage::add_content(&client, &default_cache_dir(), &inst, ct, &hit.slug))?)
         })();
         self.status = match run {
             Ok(r) if r.installed.is_empty() => format!("'{}' already present", hit.title),
@@ -505,7 +551,7 @@ impl App {
         let Some(row) = self.mods.get(idx) else { return };
         let filename = row.filename.clone();
         let label = row.name.clone();
-        self.status = match manage::remove_mod(&inst, &filename) {
+        self.status = match manage::remove_content(&inst, self.content_type, &filename) {
             Ok(()) => format!("Removed {label}"),
             Err(e) => format!("Remove failed: {e}"),
         };
@@ -599,7 +645,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let right_focused = app.focus == Focus::Right;
 
     // Tab strip.
-    let tabs = Tabs::new(vec!["1 Properties", "2 Mods", "3 Console"])
+    let tabs = Tabs::new(vec!["1 Properties", "2 Content", "3 Console"])
         .select(app.right_view.index())
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .divider("│");
@@ -610,10 +656,27 @@ fn ui(f: &mut Frame, app: &mut App) {
         RightView::Mods => {
             let split = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(6)])
+                .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(6)])
                 .split(content);
 
-            let title = format!(" mods — {inst_name} ({}) ", app.mods.len());
+            // Content-type selector strip ([ ] to switch).
+            let seg = Line::from(
+                ContentType::ALL
+                    .iter()
+                    .flat_map(|ct| {
+                        let active = *ct == app.content_type;
+                        let style = if active {
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        vec![Span::styled(format!(" {} ", ct.label()), style), Span::raw(" ")]
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            f.render_widget(Paragraph::new(seg), split[0]);
+
+            let title = format!(" {} — {inst_name} ({}) · [ ] switch ", app.content_type.label(), app.mods.len());
             let items: Vec<ListItem> = app
                 .mods
                 .iter()
@@ -638,20 +701,21 @@ fn ui(f: &mut Frame, app: &mut App) {
                 )
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("▸ ");
-            f.render_stateful_widget(widget, split[0], &mut app.mod_state);
+            f.render_stateful_widget(widget, split[1], &mut app.mod_state);
 
-            // Detail box for the highlighted mod.
+            // Detail box for the highlighted item.
             let detail = match app.mod_state.selected().and_then(|i| app.mods.get(i)) {
                 Some(m) => {
                     let desc = if m.description.is_empty() { "—" } else { m.description.as_str() };
-                    format!("{}\n{}\n\nfile: {}  ({})", m.name, desc, m.filename, human_size(m.size))
+                    let ver = if m.version.is_empty() { String::new() } else { format!("  v{}", m.version) };
+                    format!("{}{}\n{}\n\nfile: {}  ({})", m.name, ver, desc, m.filename, human_size(m.size))
                 }
-                None => "No mods. Press a to add one.".into(),
+                None => format!("No {}. Press a to add.", app.content_type.label().to_lowercase()),
             };
             let detail_widget = Paragraph::new(detail)
                 .block(Block::default().borders(Borders::ALL).title(" details "))
                 .wrap(Wrap { trim: true });
-            f.render_widget(detail_widget, split[1]);
+            f.render_widget(detail_widget, split[2]);
         }
         RightView::Console => {
             let scroll_tag = if app.console_scroll > 0 {
@@ -801,9 +865,12 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
     loop {
         // Apply any completed background enrichment for the visible instance.
         while let Ok(name) = app.enrich_rx.try_recv() {
-            if app.selected_instance().map(|i| i.config.name == name).unwrap_or(false) {
+            if app.content_type == ContentType::Mod
+                && app.selected_instance().map(|i| i.config.name == name).unwrap_or(false)
+            {
                 let sel = app.mod_state.selected();
-                app.mods = app.instances.get(app.selected).map(list_mods).unwrap_or_default();
+                let ct = app.content_type;
+                app.mods = app.instances.get(app.selected).map(|i| list_content(i, ct)).unwrap_or_default();
                 app.mod_state.select(sel.filter(|i| *i < app.mods.len()).or(Some(0)).filter(|_| !app.mods.is_empty()));
             }
         }
@@ -905,6 +972,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                     KeyCode::Char('1') => app.right_view = RightView::Properties,
                     KeyCode::Char('2') => app.right_view = RightView::Mods,
                     KeyCode::Char('3') => app.right_view = RightView::Console,
+                    KeyCode::Char(']') => {
+                        app.content_type = content_next(app.content_type);
+                        app.right_view = RightView::Mods;
+                        app.refresh_mods();
+                    }
+                    KeyCode::Char('[') => {
+                        app.content_type = content_prev(app.content_type);
+                        app.right_view = RightView::Mods;
+                        app.refresh_mods();
+                    }
                     KeyCode::Char('v') => app.right_view = app.right_view.cycle(),
                     KeyCode::Enter | KeyCode::Char('p') => app.play(),
                     KeyCode::Char('x') => app.stop(),

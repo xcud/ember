@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::import;
 use crate::instance::Instance;
-use crate::manifest::{Loader, Lock, LockedMod, Pack};
+use crate::manifest::{ContentType, Loader, Lock, LockedMod, Pack};
 use crate::modrinth::Client;
 use crate::sync::{self, SyncOptions};
 use crate::update;
@@ -100,14 +100,75 @@ fn instance_loader_gv(instance: &Instance) -> (Loader, String) {
     (loader, gv)
 }
 
+/// Search Modrinth for content of a given type, compatible with this instance.
+pub async fn search_content(
+    client: &Client,
+    instance: &Instance,
+    content_type: ContentType,
+    query: &str,
+) -> anyhow::Result<Vec<SearchHit>> {
+    let (loader, gv) = instance_loader_gv(instance);
+    let cats = content_type.search_categories(loader);
+    client.search_typed(query, content_type.project_type(), &cats, &gv).await
+}
+
 /// Search Modrinth for mods compatible with this instance.
 pub async fn search(
     client: &Client,
     instance: &Instance,
     query: &str,
 ) -> anyhow::Result<Vec<SearchHit>> {
+    search_content(client, instance, ContentType::Mod, query).await
+}
+
+/// Add content of a given type (mod / resource pack / shader) by slug or id.
+/// Mods go through the full pack-tracked path with dependency expansion;
+/// resource packs and shaders install the newest compatible file to their
+/// folder (no deps, not lock-tracked).
+pub async fn add_content(
+    client: &Client,
+    cache_dir: &Path,
+    instance: &Instance,
+    content_type: ContentType,
+    ident: &str,
+) -> anyhow::Result<AddReport> {
+    if content_type == ContentType::Mod {
+        return add_project(client, cache_dir, instance, ident).await;
+    }
     let (loader, gv) = instance_loader_gv(instance);
-    client.search(query, loader.modrinth_id(), &gv).await
+    let loaders = content_type.version_loaders(loader);
+    let mut report = AddReport { installed: Vec::new(), already: Vec::new(), incompatible: Vec::new() };
+    let versions = client.project_versions_loaders(ident, &loaders, &gv).await?;
+    match versions.into_iter().next() {
+        Some(best) => {
+            if let Some(file) = best.primary_file() {
+                let dir = instance.content_dir(content_type);
+                let (cached, _) = download::ensure_cached(
+                    client.http(),
+                    cache_dir,
+                    &file.url,
+                    file.hashes.sha1.as_deref().unwrap_or_default(),
+                )
+                .await?;
+                download::install(&cached, &dir.join(&file.filename))?;
+                report.installed.push(format!("{ident} {}", best.version_number));
+            }
+        }
+        None => report.incompatible.push(ident.to_string()),
+    }
+    Ok(report)
+}
+
+/// Remove a content file of a given type from its folder (mods stay pack-aware).
+pub fn remove_content(instance: &Instance, content_type: ContentType, filename: &str) -> anyhow::Result<()> {
+    if content_type == ContentType::Mod {
+        return remove_mod(instance, filename);
+    }
+    let p = instance.content_dir(content_type).join(filename);
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
 }
 
 /// Install `start_ident` (slug or project id) and its required dependencies,
