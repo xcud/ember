@@ -16,5 +16,6 @@ pub mod auth;
 pub mod instance;
 pub mod modpack;
 pub mod install;
+pub mod manage;
 
 pub use manifest::{Loader, Pack, Lock, LockedMod, UnresolvedMod};

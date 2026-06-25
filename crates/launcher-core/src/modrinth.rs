@@ -36,7 +36,33 @@ pub struct Version {
     /// "release" | "beta" | "alpha".
     #[serde(default)]
     pub version_type: String,
+    #[serde(default)]
+    pub dependencies: Vec<Dependency>,
     pub files: Vec<VersionFile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Dependency {
+    #[serde(default)]
+    pub project_id: Option<String>,
+    /// "required" | "optional" | "incompatible" | "embedded".
+    #[serde(default)]
+    pub dependency_type: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchHit {
+    pub project_id: String,
+    pub slug: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearchResponse {
+    hits: Vec<SearchHit>,
 }
 
 impl Version {
@@ -101,6 +127,29 @@ impl Client {
             .await?
             .error_for_status()?;
         Ok(resp.json().await?)
+    }
+
+    /// Search for mods compatible with a loader + game version.
+    pub async fn search(
+        &self,
+        query: &str,
+        loader: &str,
+        game_version: &str,
+    ) -> anyhow::Result<Vec<SearchHit>> {
+        let facets = serde_json::to_string(&[
+            vec!["project_type:mod".to_string()],
+            vec![format!("categories:{loader}")],
+            vec![format!("versions:{game_version}")],
+        ])?;
+        let resp = self
+            .http
+            .get(format!("{API}/search"))
+            .query(&[("query", query), ("facets", &facets), ("limit", "20")])
+            .send()
+            .await?
+            .error_for_status()?;
+        let parsed: SearchResponse = resp.json().await?;
+        Ok(parsed.hits)
     }
 
     /// List a project's versions, filtered to one loader and game version.

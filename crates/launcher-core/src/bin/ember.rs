@@ -16,6 +16,7 @@ use launcher_core::auth::{self, Account};
 use launcher_core::install;
 use launcher_core::instance::Instance;
 use launcher_core::launch::{self, AuthSession, Host, LaunchOptions};
+use launcher_core::manage;
 use launcher_core::modpack;
 use launcher_core::manifest::Pack;
 use launcher_core::sync::{self, ModStatus, SyncOptions};
@@ -37,7 +38,10 @@ Usage:
   ember instance delete <name>
   ember modpack import <file.mrpack> [--name NAME] [--mc DIR] [--max-mb N]
   ember install <mc_version> [--fabric <loader_version>] [--mc DIR]
-       (download a vanilla version, and optionally a Fabric loader, into the shared install)";
+       (download a vanilla version, and optionally a Fabric loader, into the shared install)
+  ember mod add <instance> <query>      (search Modrinth, install + dependencies)
+  ember mod remove <instance> <filename.jar>
+  ember mod update <instance>           (re-resolve mods to latest compatible)";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -53,6 +57,7 @@ async fn main() -> anyhow::Result<()> {
         "instance" => cmd_instance(args).await,
         "modpack" => cmd_modpack(args).await,
         "install" => cmd_install(args).await,
+        "mod" => cmd_mod(args).await,
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -159,6 +164,60 @@ fn find_java(mc_dir: &Path, component: &str, host: &Host) -> PathBuf {
         return candidate;
     }
     PathBuf::from("java") // fall back to PATH
+}
+
+async fn cmd_mod(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let sub = args.next().unwrap_or_default();
+    let inst_name = args.next().unwrap_or_default();
+    let rest: Vec<String> = args.collect();
+    let instance = Instance::find(&inst_name)
+        .ok_or_else(|| anyhow::anyhow!("no instance named '{inst_name}'"))?;
+    let client = Client::new()?;
+    let cache_dir = default_cache_dir();
+
+    match sub.as_str() {
+        "add" => {
+            let query = rest.join(" ");
+            if query.is_empty() {
+                eprintln!("usage: ember mod add <instance> <query>");
+                std::process::exit(2);
+            }
+            eprintln!("Searching Modrinth for '{query}' ...");
+            let report = manage::add_mod(&client, &cache_dir, &instance, &query).await?;
+            for s in &report.installed {
+                println!("  [+ add ] {s}");
+            }
+            for s in &report.already {
+                println!("  [ have ] {s}");
+            }
+            for s in &report.incompatible {
+                println!("  [ !!   ] {s} — no compatible build");
+            }
+            println!("\n{} installed (incl. dependencies)", report.installed.len());
+        }
+        "remove" => {
+            let filename = rest.first().cloned().unwrap_or_default();
+            if filename.is_empty() {
+                eprintln!("usage: ember mod remove <instance> <filename.jar>");
+                std::process::exit(2);
+            }
+            manage::remove_mod(&instance, &filename)?;
+            println!("Removed {filename} from '{inst_name}'");
+        }
+        "update" => {
+            eprintln!("Updating mods for '{inst_name}' ...");
+            let s = manage::update_instance(&client, &cache_dir, &instance).await?;
+            println!(
+                "{} updated, {} added, {} incompatible, {} downloaded",
+                s.updated, s.added, s.incompatible, s.downloaded
+            );
+        }
+        other => {
+            eprintln!("unknown mod subcommand: {other}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+    Ok(())
 }
 
 async fn cmd_install(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {

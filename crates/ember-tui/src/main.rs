@@ -20,6 +20,7 @@ use ember_term::PtySession;
 use launcher_core::auth::Account;
 use launcher_core::instance::Instance;
 use launcher_core::launch::{AuthSession, Host};
+use launcher_core::manage;
 use launcher_core::modpack;
 use launcher_core::modrinth::Client;
 
@@ -45,6 +46,7 @@ enum Modal {
     CloneName,
     ImportPath,
     ConfirmDelete,
+    AddMod,
 }
 
 struct App {
@@ -102,7 +104,8 @@ impl App {
             input: String::new(),
         };
         app.refresh();
-        app.status = "Tab focus · ↑/↓ select · p play · m mods · n/c/d/i manage · q quit".into();
+        app.status =
+            "Tab focus · p play · m mods · a add · r remove · u update · n/c/d/i instance · q quit".into();
         app
     }
 
@@ -235,6 +238,7 @@ impl App {
             Modal::CloneName => self.commit_clone(),
             Modal::ImportPath => self.commit_import(),
             Modal::ConfirmDelete => self.commit_delete(),
+            Modal::AddMod => self.commit_add(),
             Modal::None => Ok(String::new()),
         };
         match result {
@@ -298,6 +302,54 @@ impl App {
         ))?;
         let warn = if report.version_installed { "" } else { " (⚠ loader not installed)" };
         Ok(format!("Imported '{}' — {} files{}", report.instance.config.name, report.installed, warn))
+    }
+
+    fn commit_add(&mut self) -> anyhow::Result<String> {
+        let query = self.input.trim().to_string();
+        if query.is_empty() {
+            anyhow::bail!("search query required");
+        }
+        let inst = self.selected_instance().cloned().ok_or_else(|| anyhow::anyhow!("no instance selected"))?;
+        let client = Client::new()?;
+        let rt = tokio::runtime::Runtime::new()?;
+        let report = rt.block_on(manage::add_mod(&client, &default_cache_dir(), &inst, &query))?;
+        if report.installed.is_empty() {
+            Ok(format!("'{query}': nothing new installed (already present?)"))
+        } else {
+            Ok(format!("Added: {}", report.installed.join(", ")))
+        }
+    }
+
+    fn update_instance(&mut self) {
+        let Some(inst) = self.selected_instance().cloned() else { return };
+        self.status = format!("Updating '{}' ...", inst.config.name);
+        let run = (|| -> anyhow::Result<manage::UpdateSummary> {
+            let client = Client::new()?;
+            let rt = tokio::runtime::Runtime::new()?;
+            Ok(rt.block_on(manage::update_instance(&client, &default_cache_dir(), &inst))?)
+        })();
+        self.status = match run {
+            Ok(s) => format!(
+                "'{}': {} updated, {} added, {} incompatible, {} downloaded",
+                inst.config.name, s.updated, s.added, s.incompatible, s.downloaded
+            ),
+            Err(e) => format!("Update failed: {e}"),
+        };
+        self.refresh_mods();
+    }
+
+    fn remove_selected_mod(&mut self) {
+        if self.right_view != RightView::Mods {
+            return;
+        }
+        let Some(inst) = self.selected_instance().cloned() else { return };
+        let Some(idx) = self.mod_state.selected() else { return };
+        let Some(name) = self.mods.get(idx).cloned() else { return };
+        self.status = match manage::remove_mod(&inst, &name) {
+            Ok(()) => format!("Removed {name}"),
+            Err(e) => format!("Remove failed: {e}"),
+        };
+        self.refresh_mods();
     }
 
     /// Resize the console PTY to match its pane's inner dimensions.
@@ -420,6 +472,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 let n = app.selected_instance().map(|i| i.config.name.as_str()).unwrap_or("");
                 (" confirm delete ", format!("Delete '{n}'? Enter = yes, Esc = no"))
             }
+            Modal::AddMod => (" add mod (Modrinth) ", format!("Search: {}_", app.input)),
             Modal::None => ("", String::new()),
         };
         let area = centered_rect(60, 5, f.area());
@@ -506,6 +559,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                     KeyCode::Char('c') => app.begin(Modal::CloneName),
                     KeyCode::Char('d') => app.begin(Modal::ConfirmDelete),
                     KeyCode::Char('i') => app.begin(Modal::ImportPath),
+                    KeyCode::Char('a') | KeyCode::Char('/') => app.begin(Modal::AddMod),
+                    KeyCode::Char('u') => app.update_instance(),
+                    KeyCode::Delete | KeyCode::Char('r') => app.remove_selected_mod(),
                     _ => {}
                 }
             }
