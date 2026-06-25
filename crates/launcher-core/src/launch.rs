@@ -75,6 +75,23 @@ pub struct LaunchOptions {
     pub natives_dir: PathBuf,
 }
 
+/// Locate Mojang's bundled Java runtime for `component` under `mc_home`,
+/// falling back to `java` on PATH.
+pub fn find_bundled_java(mc_home: &Path, component: &str, host: &Host) -> PathBuf {
+    let candidate = mc_home
+        .join("runtime")
+        .join(component)
+        .join(host.os_name)
+        .join(component)
+        .join("bin")
+        .join("java");
+    if candidate.exists() {
+        candidate
+    } else {
+        PathBuf::from("java")
+    }
+}
+
 /// The merged, rule-filtered result, ready to turn into an argv.
 pub struct Resolved {
     pub id: String,

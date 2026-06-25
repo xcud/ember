@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/launcher-core"]
+members = ["crates/launcher-core", "crates/ember-term", "crates/ember-tui"]
 
 [workspace.package]
 edition = "2021"
@@ -19,3 +19,7 @@ anyhow = "1"
 thiserror = "2"
 walkdir = "2"
 futures-util = "0.3"
+portable-pty = "0.9"
+vt100 = "0.15"
+ratatui = "0.29"
+crossterm = "0.28"

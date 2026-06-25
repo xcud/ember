@@ -1,0 +1,12 @@
+[package]
+name = "ember-term"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PTY-backed virtual terminal sessions for ember: spawn a process in a pseudo-terminal and observe its screen via vt100. The multiplexer spine for the TUI."
+
+[dependencies]
+portable-pty.workspace = true
+vt100.workspace = true
+anyhow.workspace = true
