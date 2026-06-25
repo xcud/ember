@@ -244,7 +244,7 @@ impl App {
         };
         app.refresh();
         app.status =
-            "↑↓←→ navigate · Tab → tabs · ↓/Enter in · p play · a add · r remove · u update · q quit".into();
+            "↑↓←→ navigate · Esc steps up · ←→ switch tab · ↓/Enter in · p play · a add · r remove · u update · q quit".into();
         app
     }
 
@@ -1022,18 +1022,23 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                             app.set_content_type(content_prev(app.content_type));
                         } else if right {
                             app.set_content_type(content_next(app.content_type));
-                        } else if up {
-                            app.focus = Focus::Tabs;
+                        } else if up || key.code == KeyCode::Esc {
+                            app.focus = Focus::Tabs; // Esc steps up to the tab strip
                         } else if down || enter {
                             app.focus = Focus::Body;
-                        } else if key.code == KeyCode::Esc {
-                            app.focus = Focus::List;
                         } else {
                             app.handle_command(key.code);
                         }
                     }
                     Focus::Body => {
-                        if left || key.code == KeyCode::Esc {
+                        if key.code == KeyCode::Esc {
+                            // Esc steps up to the parent strip (the tab menu).
+                            app.focus = if app.right_view == RightView::Mods {
+                                Focus::Types
+                            } else {
+                                Focus::Tabs
+                            };
+                        } else if left {
                             app.focus = Focus::List;
                         } else if up {
                             match app.right_view {
