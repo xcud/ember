@@ -44,16 +44,16 @@ enum RightView {
 impl RightView {
     fn index(self) -> usize {
         match self {
-            RightView::Mods => 0,
-            RightView::Console => 1,
-            RightView::Properties => 2,
+            RightView::Properties => 0,
+            RightView::Mods => 1,
+            RightView::Console => 2,
         }
     }
     fn cycle(self) -> RightView {
         match self {
+            RightView::Properties => RightView::Mods,
             RightView::Mods => RightView::Console,
             RightView::Console => RightView::Properties,
-            RightView::Properties => RightView::Mods,
         }
     }
 }
@@ -117,7 +117,7 @@ impl App {
             console: None,
             console_scroll: 0,
             focus: Focus::List,
-            right_view: RightView::Mods,
+            right_view: RightView::Properties,
             status: String::new(),
             modal: Modal::None,
             input: String::new(),
@@ -462,7 +462,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let right_focused = app.focus == Focus::Right;
 
     // Tab strip.
-    let tabs = Tabs::new(vec!["1 Mods", "2 Console", "3 Properties"])
+    let tabs = Tabs::new(vec!["1 Properties", "2 Mods", "3 Console"])
         .select(app.right_view.index())
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .divider("│");
@@ -660,9 +660,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                         app.right_view = RightView::Mods;
                         app.focus = Focus::Right;
                     }
-                    KeyCode::Char('1') => app.right_view = RightView::Mods,
-                    KeyCode::Char('2') => app.right_view = RightView::Console,
-                    KeyCode::Char('3') => app.right_view = RightView::Properties,
+                    KeyCode::Char('1') => app.right_view = RightView::Properties,
+                    KeyCode::Char('2') => app.right_view = RightView::Mods,
+                    KeyCode::Char('3') => app.right_view = RightView::Console,
                     KeyCode::Char('v') => app.right_view = app.right_view.cycle(),
                     KeyCode::Enter | KeyCode::Char('p') => app.play(),
                     KeyCode::Char('x') => app.stop(),
