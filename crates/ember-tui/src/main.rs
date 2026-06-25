@@ -105,7 +105,7 @@ impl App {
         };
         app.refresh();
         app.status =
-            "Tab focus · p play · m mods · a add · r remove · u update · n/c/d/i instance · q quit".into();
+            "Tab/←→ focus · Esc back · p play · m mods · a add · r remove · u update · n/c/d/i instance · q quit".into();
         app
     }
 
@@ -519,6 +519,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                 let right_mods = app.focus == Focus::Right && app.right_view == RightView::Mods;
                 match key.code {
                     KeyCode::Char('q') => break,
+                    // Esc / ← always back out to the instance list.
+                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => app.focus = Focus::List,
+                    KeyCode::Right | KeyCode::Char('l') => app.focus = Focus::Right,
                     KeyCode::Tab => {
                         app.focus = if app.focus == Focus::List { Focus::Right } else { Focus::List };
                     }
