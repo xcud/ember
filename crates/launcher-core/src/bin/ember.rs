@@ -149,9 +149,8 @@ fn find_java(mc_dir: &Path, component: &str, host: &Host) -> PathBuf {
 }
 
 async fn cmd_login() -> anyhow::Result<()> {
-    let http = Client::new()?;
     eprintln!("Signing in with Microsoft (Azure app {})...", auth::client_id());
-    let account = auth::login_interactive(http.http(), |dc| {
+    let account = auth::login_interactive(|dc| {
         let url = &dc.verification_uri;
         println!("\n  To sign in, open:  {url}");
         println!("  and enter code:    {}\n", dc.user_code);
@@ -237,8 +236,7 @@ async fn cmd_launch(mut args: impl Iterator<Item = String>) -> anyhow::Result<()
     let auth = if offline {
         AuthSession::offline(&name)
     } else if let Some(account) = Account::load() {
-        let http = Client::new()?;
-        match auth::ensure_session(http.http(), account).await {
+        match auth::ensure_session(account).await {
             Ok(session) => {
                 eprintln!("  account:     {} (online)", session.player_name);
                 session

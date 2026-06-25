@@ -36,6 +36,27 @@ fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
 }
 
+/// A dedicated HTTP client for auth. The Minecraft services API sits behind a
+/// WAF that 403s "botty" User-Agents (e.g. ones containing an email), so we use
+/// a plain, conventional UA distinct from the Modrinth client's.
+fn auth_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent("ember/0.1.0")
+        .build()?)
+}
+
+/// Read a response as JSON, or bail with the status + body so failures are
+/// diagnosable instead of opaque.
+async fn json_or_err(resp: reqwest::Response, ctx: &str) -> anyhow::Result<Value> {
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let snippet: String = text.chars().take(400).collect();
+        anyhow::bail!("{ctx}: HTTP {status}: {snippet}");
+    }
+    Ok(serde_json::from_str(&text)?)
+}
+
 /// Persisted account. The refresh token is the long-lived credential; the
 /// Minecraft token/xuid are cached and re-minted when expired.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,14 +215,8 @@ async fn xbl_authenticate(http: &reqwest::Client, ms_access: &str) -> anyhow::Re
         "RelyingParty": "http://auth.xboxlive.com",
         "TokenType": "JWT"
     });
-    let v: Value = http
-        .post(XBL_URL)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    let resp = http.post(XBL_URL).json(&body).send().await?;
+    let v = json_or_err(resp, "Xbox Live auth").await?;
     let token = v["Token"].as_str().unwrap_or_default().to_string();
     let uhs = v["DisplayClaims"]["xui"][0]["uhs"]
         .as_str()
@@ -230,7 +245,7 @@ async fn xsts_authorize(http: &reqwest::Client, xbl_token: &str) -> anyhow::Resu
         };
         anyhow::bail!("{msg} (XErr {xerr})");
     }
-    let v: Value = resp.error_for_status()?.json().await?;
+    let v = json_or_err(resp, "XSTS authorize").await?;
     let token = v["Token"].as_str().unwrap_or_default().to_string();
     let uhs = v["DisplayClaims"]["xui"][0]["uhs"].as_str().unwrap_or_default().to_string();
     let xuid = v["DisplayClaims"]["xui"][0]["xid"].as_str().unwrap_or_default().to_string();
@@ -240,14 +255,12 @@ async fn xsts_authorize(http: &reqwest::Client, xbl_token: &str) -> anyhow::Resu
 /// Step 4: exchange for a Minecraft access token. Returns (token, expires_in).
 async fn mc_login(http: &reqwest::Client, uhs: &str, xsts_token: &str) -> anyhow::Result<(String, u64)> {
     let identity = format!("XBL3.0 x={uhs};{xsts_token}");
-    let v: Value = http
+    let resp = http
         .post(MC_LOGIN_URL)
         .json(&serde_json::json!({ "identityToken": identity }))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
         .await?;
+    let v = json_or_err(resp, "Minecraft login").await?;
     let token = v["access_token"].as_str().unwrap_or_default().to_string();
     let expires_in = v["expires_in"].as_u64().unwrap_or(86_400);
     Ok((token, expires_in))
@@ -298,26 +311,28 @@ async fn finish_chain(
 
 /// Full interactive login. `on_code` is called with the device code so the UI
 /// can tell the user where to go. Returns the persisted Account.
-pub async fn login_interactive<F>(http: &reqwest::Client, on_code: F) -> anyhow::Result<Account>
+pub async fn login_interactive<F>(on_code: F) -> anyhow::Result<Account>
 where
     F: FnOnce(&DeviceCode),
 {
-    let dc = start_device_code(http).await?;
+    let http = auth_client()?;
+    let dc = start_device_code(&http).await?;
     on_code(&dc);
-    let ms = poll_for_tokens(http, &dc).await?;
-    let account = finish_chain(http, ms).await?;
+    let ms = poll_for_tokens(&http, &dc).await?;
+    let account = finish_chain(&http, ms).await?;
     account.save()?;
     Ok(account)
 }
 
 /// Return a launch-ready session for the stored account, refreshing the
 /// Minecraft token if it's expired. Persists any rotated tokens.
-pub async fn ensure_session(http: &reqwest::Client, mut account: Account) -> anyhow::Result<AuthSession> {
+pub async fn ensure_session(mut account: Account) -> anyhow::Result<AuthSession> {
     if now_secs() < account.mc_expires_at && !account.mc_access_token.is_empty() {
         return Ok(account.to_session());
     }
-    let ms = refresh_ms(http, &account.ms_refresh_token).await?;
-    let refreshed = finish_chain(http, ms).await?;
+    let http = auth_client()?;
+    let ms = refresh_ms(&http, &account.ms_refresh_token).await?;
+    let refreshed = finish_chain(&http, ms).await?;
     account = refreshed;
     account.save()?;
     Ok(account.to_session())
