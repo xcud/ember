@@ -13,7 +13,9 @@ use launcher_core::import::import_mods_dir;
 use launcher_core::manifest::Loader;
 use launcher_core::modrinth::Client;
 use launcher_core::auth::{self, Account};
+use launcher_core::instance::Instance;
 use launcher_core::launch::{self, AuthSession, Host, LaunchOptions};
+use launcher_core::modpack;
 use launcher_core::manifest::Pack;
 use launcher_core::sync::{self, ModStatus, SyncOptions};
 use launcher_core::update::{self, Change};
@@ -27,7 +29,12 @@ Usage:
   ember launch <version_id> [--mc DIR] [--name NAME] [--java PATH] [--max-mb N] [--run] [--offline]
        (default prints the command; --run starts the game; uses your account unless --offline)
   ember login    (sign in with your Microsoft account via device code)
-  ember whoami   (show the signed-in account)";
+  ember whoami   (show the signed-in account)
+  ember instance list
+  ember instance new <name> --version <id> [--mc DIR] [--max-mb N]
+  ember instance clone <name> <new_name>
+  ember instance delete <name>
+  ember modpack import <file.mrpack> [--name NAME] [--mc DIR] [--max-mb N]";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -40,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
         "launch" => cmd_launch(args).await,
         "login" => cmd_login().await,
         "whoami" => cmd_whoami().await,
+        "instance" => cmd_instance(args).await,
+        "modpack" => cmd_modpack(args).await,
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -146,6 +155,125 @@ fn find_java(mc_dir: &Path, component: &str, host: &Host) -> PathBuf {
         return candidate;
     }
     PathBuf::from("java") // fall back to PATH
+}
+
+async fn cmd_instance(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let sub = args.next().unwrap_or_default();
+    match sub.as_str() {
+        "list" => {
+            let mut instances = Instance::list();
+            if instances.is_empty() {
+                if let Some(main) = Instance::detect_main() {
+                    instances.push(main);
+                }
+            }
+            if instances.is_empty() {
+                println!("No instances. Create one with `ember instance new` or `ember modpack import`.");
+            }
+            for i in &instances {
+                let managed = if i.is_managed() { "" } else { "  (shared)" };
+                println!("{:<20} {}{}", i.config.name, i.config.version_id, managed);
+            }
+        }
+        "new" => {
+            let name = args.next().unwrap_or_default();
+            let mut version: Option<String> = None;
+            let mut mc = default_mc_dir();
+            let mut max_mb = 4096u32;
+            while let Some(a) = args.next() {
+                match a.as_str() {
+                    "--version" => version = args.next(),
+                    "--mc" => mc = PathBuf::from(args.next().unwrap_or_default()),
+                    "--max-mb" => max_mb = args.next().and_then(|s| s.parse().ok()).unwrap_or(max_mb),
+                    _ => {}
+                }
+            }
+            if name.is_empty() || version.is_none() {
+                eprintln!("usage: ember instance new <name> --version <id> [--mc DIR] [--max-mb N]");
+                std::process::exit(2);
+            }
+            let inst = Instance::create(&name, &version.unwrap(), mc, max_mb)?;
+            println!("Created instance '{}' at {}", inst.config.name, inst.dir.display());
+        }
+        "clone" => {
+            let name = args.next().unwrap_or_default();
+            let new_name = args.next().unwrap_or_default();
+            let src = Instance::find(&name)
+                .or_else(|| Instance::detect_main().filter(|m| m.config.name == name))
+                .ok_or_else(|| anyhow::anyhow!("no instance named '{name}'"))?;
+            let inst = src.clone_to(&new_name)?;
+            println!("Cloned '{name}' -> '{}' ({})", inst.config.name, inst.dir.display());
+        }
+        "delete" => {
+            let name = args.next().unwrap_or_default();
+            let inst = Instance::find(&name)
+                .ok_or_else(|| anyhow::anyhow!("no managed instance named '{name}'"))?;
+            inst.delete()?;
+            println!("Deleted instance '{name}'");
+        }
+        other => {
+            eprintln!("unknown instance subcommand: {other}\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+    Ok(())
+}
+
+async fn cmd_modpack(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let sub = args.next().unwrap_or_default();
+    if sub != "import" {
+        eprintln!("usage: ember modpack import <file.mrpack> [--name NAME] [--mc DIR] [--max-mb N]");
+        std::process::exit(2);
+    }
+    let mut mrpack: Option<PathBuf> = None;
+    let mut name: Option<String> = None;
+    let mut mc = default_mc_dir();
+    let mut max_mb = 4096u32;
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--name" => name = args.next(),
+            "--mc" => mc = PathBuf::from(args.next().unwrap_or_default()),
+            "--max-mb" => max_mb = args.next().and_then(|s| s.parse().ok()).unwrap_or(max_mb),
+            other if mrpack.is_none() => mrpack = Some(PathBuf::from(other)),
+            _ => {}
+        }
+    }
+    let mrpack = mrpack.unwrap_or_else(|| {
+        eprintln!("usage: ember modpack import <file.mrpack> [--name NAME]");
+        std::process::exit(2);
+    });
+    // Default the instance name to the mrpack filename stem.
+    let name = name.unwrap_or_else(|| {
+        mrpack
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "modpack".into())
+    });
+
+    let client = Client::new()?;
+    let cache_dir = default_cache_dir();
+    eprintln!("Importing {} ...", mrpack.display());
+    let report =
+        modpack::import_mrpack(client.http(), &cache_dir, &mrpack, &name, mc, max_mb).await?;
+
+    println!(
+        "\nImported '{}' as instance '{}'",
+        report.pack_name, report.instance.config.name
+    );
+    println!(
+        "  {} on {} ({})",
+        report.game_version, report.loader, report.version_id
+    );
+    println!("  {} files installed, {} overrides, {} skipped", report.installed, report.overrides, report.skipped);
+    if !report.version_installed {
+        println!(
+            "  ⚠ loader version '{}' is not installed in {} — install it before launching.",
+            report.version_id,
+            default_mc_dir().display()
+        );
+    }
+    println!("\nLaunch with: ember launch {} --mc <shared install>", report.version_id);
+    Ok(())
 }
 
 async fn cmd_login() -> anyhow::Result<()> {

@@ -113,6 +113,11 @@ impl Instance {
         out
     }
 
+    /// Find a managed instance by name.
+    pub fn find(name: &str) -> Option<Instance> {
+        Instance::list().into_iter().find(|i| i.config.name == name)
+    }
+
     /// Create a new, isolated instance under [`instances_root`].
     pub fn create(name: &str, version_id: &str, mc_home: PathBuf, max_mb: u32) -> anyhow::Result<Instance> {
         let dir = instances_root().join(name);
@@ -177,6 +182,87 @@ impl Instance {
         self.config.last_played = Some(now_secs());
         let _ = self.save();
     }
+
+    /// Is this a managed instance (lives under [`instances_root`])? The
+    /// synthesized `main` instance points at the shared install and is not.
+    pub fn is_managed(&self) -> bool {
+        self.dir.starts_with(instances_root())
+    }
+
+    /// Clone this instance's *setup* (mods, configs, packs) into a new managed
+    /// instance. Worlds (`saves/`) are intentionally not copied — they can be
+    /// huge and are rarely what you want duplicated.
+    pub fn clone_to(&self, new_name: &str) -> anyhow::Result<Instance> {
+        let dir = instances_root().join(new_name);
+        if dir.exists() {
+            anyhow::bail!("instance '{new_name}' already exists");
+        }
+        let game_dir = dir.join("minecraft");
+        std::fs::create_dir_all(&game_dir)?;
+        for sub in ["mods", "config", "resourcepacks", "shaderpacks"] {
+            let src = self.config.game_dir.join(sub);
+            if src.is_dir() {
+                copy_dir_all(&src, &game_dir.join(sub))?;
+            }
+        }
+        for file in ["options.txt", "pack.toml", "pack.lock"] {
+            let src = if file.starts_with("pack") {
+                self.dir.join(file)
+            } else {
+                self.config.game_dir.join(file)
+            };
+            if src.is_file() {
+                let dest = if file.starts_with("pack") {
+                    dir.join(file)
+                } else {
+                    game_dir.join(file)
+                };
+                std::fs::copy(&src, dest)?;
+            }
+        }
+        let inst = Instance {
+            config: InstanceConfig {
+                name: new_name.to_string(),
+                version_id: self.config.version_id.clone(),
+                mc_home: self.config.mc_home.clone(),
+                game_dir,
+                max_mb: self.config.max_mb,
+                last_played: None,
+            },
+            dir,
+        };
+        inst.save()?;
+        Ok(inst)
+    }
+
+    /// Delete this instance. Refuses to touch anything outside [`instances_root`]
+    /// (so it can never delete a shared install like `~/.minecraft`).
+    pub fn delete(self) -> anyhow::Result<()> {
+        if !self.is_managed() {
+            anyhow::bail!(
+                "refusing to delete '{}': not a managed instance ({})",
+                self.config.name,
+                self.dir.display()
+            );
+        }
+        std::fs::remove_dir_all(&self.dir)?;
+        Ok(())
+    }
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest = dst.join(entry.file_name());
+        if path.is_dir() {
+            copy_dir_all(&path, &dest)?;
+        } else {
+            std::fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

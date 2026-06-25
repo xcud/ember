@@ -12,6 +12,7 @@ ember-term = { path = "../ember-term" }
 ratatui.workspace = true
 crossterm.workspace = true
 anyhow.workspace = true
+tokio.workspace = true
 
 [[bin]]
 name = "ember-tui"

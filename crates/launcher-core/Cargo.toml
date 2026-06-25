@@ -18,6 +18,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
 futures-util.workspace = true
+zip.workspace = true
 
 [[bin]]
 name = "ember"
