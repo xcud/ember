@@ -11,7 +11,7 @@ use std::path::Path;
 
 use crate::import;
 use crate::instance::Instance;
-use crate::manifest::{Lock, LockedMod, Pack};
+use crate::manifest::{Loader, Lock, LockedMod, Pack};
 use crate::modrinth::Client;
 use crate::sync::{self, SyncOptions};
 use crate::update;
@@ -51,48 +51,62 @@ pub struct AddReport {
     pub incompatible: Vec<String>, // slugs/ids with no compatible build
 }
 
-/// Add a mod (by search query or slug) to an instance, pulling required
-/// dependencies. Downloads into the instance's mods dir and updates the pack.
-pub async fn add_mod(
+/// The loader + game version for an instance, derived cheaply from its version
+/// id (no hash resolve needed — used for search before any pack exists).
+fn instance_loader_gv(instance: &Instance) -> (Loader, String) {
+    let vid = &instance.config.version_id;
+    let loader = if vid.starts_with("fabric") {
+        Loader::Fabric
+    } else if vid.starts_with("quilt") {
+        Loader::Quilt
+    } else if vid.starts_with("neoforge") {
+        Loader::NeoForge
+    } else if vid.contains("forge") {
+        Loader::Forge
+    } else {
+        Loader::Fabric
+    };
+    let host = crate::launch::Host::current();
+    let gv = crate::launch::resolve(&instance.config.mc_home.join("versions"), vid, &host)
+        .map(|r| r.root_id)
+        .unwrap_or_default();
+    (loader, gv)
+}
+
+/// Search Modrinth for mods compatible with this instance.
+pub async fn search(
+    client: &Client,
+    instance: &Instance,
+    query: &str,
+) -> anyhow::Result<Vec<SearchHit>> {
+    let (loader, gv) = instance_loader_gv(instance);
+    client.search(query, loader.modrinth_id(), &gv).await
+}
+
+/// Install `start_ident` (slug or project id) and its required dependencies,
+/// mutating `pack`/`lock`/`report`.
+async fn install_tree(
     client: &Client,
     cache_dir: &Path,
     instance: &Instance,
-    query: &str,
-) -> anyhow::Result<AddReport> {
-    let (mut pack, mut lock) = ensure_pack(client, instance).await?;
-    let loader = pack.loader;
-    // Infer the game version from the mods; fall back to the installed version
-    // (needed for an empty instance with nothing to infer from).
-    let gv = if pack.game_version != "unknown" && !pack.game_version.is_empty() {
-        pack.game_version.clone()
-    } else {
-        let host = crate::launch::Host::current();
-        crate::launch::resolve(&instance.config.mc_home.join("versions"), &instance.config.version_id, &host)
-            .map(|r| r.root_id)
-            .unwrap_or_else(|_| pack.game_version.clone())
-    };
-
-    // Resolve the starting project: a search query -> top hit's slug.
-    let hits = client.search(query, loader.modrinth_id(), &gv).await?;
-    let start = hits
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no results for '{query}' on {loader} {gv}"))?;
-
-    let mut report = AddReport { installed: Vec::new(), already: Vec::new(), incompatible: Vec::new() };
+    pack: &mut Pack,
+    lock: &mut Lock,
+    loader: Loader,
+    gv: &str,
+    start_ident: &str,
+    report: &mut AddReport,
+) -> anyhow::Result<()> {
     let mut seen: HashSet<String> = HashSet::new();
-    let mut queue: Vec<String> = vec![start.slug.clone()];
-
+    let mut queue: Vec<String> = vec![start_ident.to_string()];
     while let Some(ident) = queue.pop() {
         if !seen.insert(ident.clone()) {
             continue;
         }
-        let versions = client.project_versions(&ident, loader.modrinth_id(), &gv).await?;
+        let versions = client.project_versions(&ident, loader.modrinth_id(), gv).await?;
         let Some(best) = versions.into_iter().next() else {
             report.incompatible.push(ident);
             continue;
         };
-        // Resolve a human slug for the pack key.
         let slug = client
             .projects(&[best.project_id.clone()])
             .await
@@ -101,10 +115,9 @@ pub async fn add_mod(
             .map(|p| p.slug)
             .unwrap_or_else(|| ident.clone());
 
-        if pack.mods.contains_key(&slug) && best.project_id != start.project_id {
+        if pack.mods.contains_key(&slug) {
             report.already.push(slug);
-        } else {
-            let Some(file) = best.primary_file() else { continue };
+        } else if let Some(file) = best.primary_file() {
             let (cached, _) = download::ensure_cached(
                 client.http(),
                 cache_dir,
@@ -113,7 +126,6 @@ pub async fn add_mod(
             )
             .await?;
             download::install(&cached, &instance.mods_dir().join(&file.filename))?;
-
             pack.mods.insert(slug.clone(), "*".to_string());
             lock.mods.retain(|m| m.slug != slug);
             lock.mods.push(LockedMod {
@@ -129,7 +141,6 @@ pub async fn add_mod(
             report.installed.push(format!("{slug} {}", best.version_number));
         }
 
-        // Queue required dependencies.
         for dep in &best.dependencies {
             if dep.dependency_type == "required" {
                 if let Some(pid) = &dep.project_id {
@@ -138,11 +149,44 @@ pub async fn add_mod(
             }
         }
     }
+    Ok(())
+}
 
+/// Add a specific Modrinth project (by slug or id) and its required deps.
+pub async fn add_project(
+    client: &Client,
+    cache_dir: &Path,
+    instance: &Instance,
+    ident: &str,
+) -> anyhow::Result<AddReport> {
+    let (mut pack, mut lock) = ensure_pack(client, instance).await?;
+    let (loader, fallback_gv) = instance_loader_gv(instance);
+    let gv = if pack.game_version != "unknown" && !pack.game_version.is_empty() {
+        pack.game_version.clone()
+    } else {
+        fallback_gv
+    };
+    let mut report = AddReport { installed: Vec::new(), already: Vec::new(), incompatible: Vec::new() };
+    install_tree(client, cache_dir, instance, &mut pack, &mut lock, loader, &gv, ident, &mut report).await?;
     lock.mods.sort_by(|a, b| a.slug.cmp(&b.slug));
     pack.write(&instance.pack_path())?;
     lock.write(&instance.lock_path())?;
     Ok(report)
+}
+
+/// Search and add the top hit (CLI convenience).
+pub async fn add_mod(
+    client: &Client,
+    cache_dir: &Path,
+    instance: &Instance,
+    query: &str,
+) -> anyhow::Result<AddReport> {
+    let hits = search(client, instance, query).await?;
+    let start = hits
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no results for '{query}'"))?;
+    add_project(client, cache_dir, instance, &start.slug).await
 }
 
 /// Remove a mod jar from an instance and drop it from the pack/lock.

@@ -22,7 +22,7 @@ use launcher_core::instance::Instance;
 use launcher_core::launch::{AuthSession, Host};
 use launcher_core::manage;
 use launcher_core::modpack;
-use launcher_core::modrinth::Client;
+use launcher_core::modrinth::{Client, SearchHit};
 
 const SIDEBAR_W: u16 = 34;
 const STATUS_H: u16 = 3;
@@ -80,6 +80,10 @@ struct App {
     status: String,
     modal: Modal,
     input: String,
+    // Add-mod results picker.
+    results: Vec<SearchHit>,
+    result_state: ListState,
+    picking: bool,
 }
 
 fn default_cache_dir() -> PathBuf {
@@ -121,6 +125,9 @@ impl App {
             status: String::new(),
             modal: Modal::None,
             input: String::new(),
+            results: Vec::new(),
+            result_state: ListState::default(),
+            picking: false,
         };
         app.refresh();
         app.status =
@@ -327,6 +334,7 @@ impl App {
         Ok(format!("Imported '{}' — {} files{}", report.instance.config.name, report.installed, warn))
     }
 
+    /// Run the search and open the results picker (does not install yet).
     fn commit_add(&mut self) -> anyhow::Result<String> {
         let query = self.input.trim().to_string();
         if query.is_empty() {
@@ -335,12 +343,53 @@ impl App {
         let inst = self.selected_instance().cloned().ok_or_else(|| anyhow::anyhow!("no instance selected"))?;
         let client = Client::new()?;
         let rt = tokio::runtime::Runtime::new()?;
-        let report = rt.block_on(manage::add_mod(&client, &default_cache_dir(), &inst, &query))?;
-        if report.installed.is_empty() {
-            Ok(format!("'{query}': nothing new installed (already present?)"))
-        } else {
-            Ok(format!("Added: {}", report.installed.join(", ")))
+        let hits = rt.block_on(manage::search(&client, &inst, &query))?;
+        if hits.is_empty() {
+            return Ok(format!("No results for '{query}'"));
         }
+        let n = hits.len();
+        self.results = hits;
+        self.result_state.select(Some(0));
+        self.picking = true;
+        Ok(format!("{n} results — ↑/↓ choose · Enter install · Esc cancel"))
+    }
+
+    fn result_next(&mut self) {
+        if self.results.is_empty() {
+            return;
+        }
+        let i = self.result_state.selected().unwrap_or(0);
+        self.result_state.select(Some((i + 1).min(self.results.len() - 1)));
+    }
+    fn result_prev(&mut self) {
+        let i = self.result_state.selected().unwrap_or(0);
+        self.result_state.select(Some(i.saturating_sub(1)));
+    }
+    fn cancel_picker(&mut self) {
+        self.picking = false;
+        self.results.clear();
+        self.status = "Cancelled.".into();
+    }
+
+    fn install_selected_result(&mut self) {
+        let Some(idx) = self.result_state.selected() else { return };
+        let Some(hit) = self.results.get(idx).cloned() else { return };
+        let Some(inst) = self.selected_instance().cloned() else { return };
+        self.picking = false;
+        self.results.clear();
+        self.status = format!("Installing {} ...", hit.title);
+        let run = (|| -> anyhow::Result<manage::AddReport> {
+            let client = Client::new()?;
+            let rt = tokio::runtime::Runtime::new()?;
+            Ok(rt.block_on(manage::add_project(&client, &default_cache_dir(), &inst, &hit.slug))?)
+        })();
+        self.status = match run {
+            Ok(r) if r.installed.is_empty() => format!("'{}' already present", hit.title),
+            Ok(r) => format!("Added: {}", r.installed.join(", ")),
+            Err(e) => format!("Add failed: {e}"),
+        };
+        self.refresh_mods();
+        self.right_view = RightView::Mods;
     }
 
     fn update_instance(&mut self) {
@@ -573,6 +622,37 @@ fn ui(f: &mut Frame, app: &mut App) {
             .wrap(Wrap { trim: false });
         f.render_widget(popup, area);
     }
+
+    // Add-mod results picker overlay.
+    if app.picking {
+        let full = f.area();
+        let h = (app.results.len() as u16 + 2).min(full.height.saturating_sub(4)).max(5);
+        let area = centered_rect(72, h, full);
+        f.render_widget(Clear, area);
+        let items: Vec<ListItem> = app
+            .results
+            .iter()
+            .map(|hit| {
+                let desc: String = hit.description.chars().take(70).collect();
+                let title_line = Line::from(vec![
+                    Span::styled(hit.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw("  "),
+                    Span::styled(desc, Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(title_line)
+            })
+            .collect();
+        let widget = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" choose a mod — Enter install · Esc cancel "),
+            )
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(widget, area, &mut app.result_state);
+    }
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> {
@@ -596,6 +676,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                             app.input.pop();
                         }
                         KeyCode::Char(c) if app.modal != Modal::ConfirmDelete => app.input.push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Results picker takes precedence over normal keys.
+                if app.picking {
+                    match key.code {
+                        KeyCode::Esc => app.cancel_picker(),
+                        KeyCode::Down | KeyCode::Char('j') => app.result_next(),
+                        KeyCode::Up | KeyCode::Char('k') => app.result_prev(),
+                        KeyCode::Enter => app.install_selected_result(),
                         _ => {}
                     }
                     continue;
