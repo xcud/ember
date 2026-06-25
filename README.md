@@ -1,12 +1,15 @@
 # ember
 
-A fast, robust, terminal-first Minecraft launcher written in Rust.
+A fast, robust, terminal-first launcher for Minecraft: Java Edition, written in Rust.
 
-`ember` is an open-source launcher built around a clean, UI-agnostic core
-(`launcher-core`) and a scriptable CLI. It manages mods reproducibly, resolves
-compatibility-aware updates, and launches modded Minecraft — designed to be
-left open as a low-overhead companion while you play, rather than a heavyweight
-window competing for resources.
+> **ember is NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED
+> WITH MOJANG OR MICROSOFT.**
+
+`ember` is an open-source, unofficial launcher built around a clean, UI-agnostic
+core (`launcher-core`) and a scriptable CLI. It manages mods reproducibly,
+resolves compatibility-aware updates, and launches the player's own copy of
+Minecraft: Java Edition — designed to be left open as a low-overhead companion
+while you play, rather than a heavyweight window competing for resources.
 
 ## Why
 
@@ -83,3 +86,16 @@ and login — is implemented and working. A native TUI is planned.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Trademark notice
+
+ember is NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH
+MOJANG OR MICROSOFT.
+
+"Minecraft" is a trademark of Mojang Synergies AB. It is used here only
+descriptively, to indicate that this tool launches Minecraft: Java Edition; its
+use does not imply any affiliation with, sponsorship by, or endorsement from
+Mojang or Microsoft. ember uses no Minecraft logos, fonts, or other brand
+assets, and is provided in accordance with the
+[Minecraft Usage Guidelines](https://www.minecraft.net/en-us/usage-guidelines).
+Players must own a valid copy of Minecraft: Java Edition to use this launcher.
