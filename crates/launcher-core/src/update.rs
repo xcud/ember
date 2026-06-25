@@ -91,6 +91,10 @@ async fn resolve_one(
         sha1: file.hashes.sha1.clone().unwrap_or_default(),
         url: file.url.clone(),
         size: file.size,
+        // Metadata isn't in the version payload; carried over from the old
+        // lock by the caller (see manage::update_instance).
+        title: String::new(),
+        description: String::new(),
     };
     (slug, Some(locked))
 }

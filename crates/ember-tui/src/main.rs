@@ -68,10 +68,19 @@ enum Modal {
     AddMod,
 }
 
+/// A row in the Mods list: a jar on disk, enriched from the lock when known.
+struct ModRow {
+    name: String,    // title or slug, else filename
+    version: String, // version number, if known
+    filename: String,
+    size: u64,
+    description: String,
+}
+
 struct App {
     instances: Vec<Instance>,
     selected: usize,
-    mods: Vec<String>,
+    mods: Vec<ModRow>,
     mod_state: ListState,
     console: Option<PtySession>,
     console_scroll: usize,
@@ -97,18 +106,62 @@ fn default_mc_dir() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".minecraft")
 }
 
-fn list_mods(inst: &Instance) -> Vec<String> {
-    let mut v = Vec::new();
+fn human_size(bytes: u64) -> String {
+    if bytes >= 1 << 20 {
+        format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
+    } else if bytes >= 1 << 10 {
+        format!("{:.0} KB", bytes as f64 / (1u64 << 10) as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn human_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// Build the mod rows for an instance: jars on disk, enriched from the lock.
+fn list_mods(inst: &Instance) -> Vec<ModRow> {
+    use std::collections::HashMap;
+    let locked: HashMap<String, launcher_core::manifest::LockedMod> =
+        launcher_core::sync::load_lock(&inst.lock_path())
+            .map(|l| l.mods.into_iter().map(|m| (m.filename.clone(), m)).collect())
+            .unwrap_or_default();
+
+    let mut rows = Vec::new();
     if let Ok(rd) = std::fs::read_dir(inst.mods_dir()) {
         for e in rd.flatten() {
-            let n = e.file_name().to_string_lossy().into_owned();
-            if n.ends_with(".jar") {
-                v.push(n);
+            let filename = e.file_name().to_string_lossy().into_owned();
+            if !filename.ends_with(".jar") {
+                continue;
+            }
+            let size_on_disk = e.metadata().map(|m| m.len()).unwrap_or(0);
+            match locked.get(&filename) {
+                Some(m) => rows.push(ModRow {
+                    name: if m.title.is_empty() { m.slug.clone() } else { m.title.clone() },
+                    version: m.version_number.clone(),
+                    filename,
+                    size: if m.size > 0 { m.size } else { size_on_disk },
+                    description: m.description.clone(),
+                }),
+                None => rows.push(ModRow {
+                    name: filename.clone(),
+                    version: String::new(),
+                    filename,
+                    size: size_on_disk,
+                    description: String::new(),
+                }),
             }
         }
     }
-    v.sort();
-    v
+    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows
 }
 
 impl App {
@@ -416,9 +469,11 @@ impl App {
         }
         let Some(inst) = self.selected_instance().cloned() else { return };
         let Some(idx) = self.mod_state.selected() else { return };
-        let Some(name) = self.mods.get(idx).cloned() else { return };
-        self.status = match manage::remove_mod(&inst, &name) {
-            Ok(()) => format!("Removed {name}"),
+        let Some(row) = self.mods.get(idx) else { return };
+        let filename = row.filename.clone();
+        let label = row.name.clone();
+        self.status = match manage::remove_mod(&inst, &filename) {
+            Ok(()) => format!("Removed {label}"),
             Err(e) => format!("Remove failed: {e}"),
         };
         self.refresh_mods();
@@ -520,8 +575,27 @@ fn ui(f: &mut Frame, app: &mut App) {
     let content = right[1];
     match app.right_view {
         RightView::Mods => {
+            let split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(6)])
+                .split(content);
+
             let title = format!(" mods — {inst_name} ({}) ", app.mods.len());
-            let items: Vec<ListItem> = app.mods.iter().map(|m| ListItem::new(m.as_str())).collect();
+            let items: Vec<ListItem> = app
+                .mods
+                .iter()
+                .map(|m| {
+                    let ver = if m.version.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  v{}", m.version)
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::raw(m.name.clone()),
+                        Span::styled(ver, Style::default().fg(Color::DarkGray)),
+                    ]))
+                })
+                .collect();
             let widget = List::new(items)
                 .block(
                     Block::default()
@@ -531,7 +605,20 @@ fn ui(f: &mut Frame, app: &mut App) {
                 )
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("▸ ");
-            f.render_stateful_widget(widget, content, &mut app.mod_state);
+            f.render_stateful_widget(widget, split[0], &mut app.mod_state);
+
+            // Detail box for the highlighted mod.
+            let detail = match app.mod_state.selected().and_then(|i| app.mods.get(i)) {
+                Some(m) => {
+                    let desc = if m.description.is_empty() { "—" } else { m.description.as_str() };
+                    format!("{}\n{}\n\nfile: {}  ({})", m.name, desc, m.filename, human_size(m.size))
+                }
+                None => "No mods. Press a to add one.".into(),
+            };
+            let detail_widget = Paragraph::new(detail)
+                .block(Block::default().borders(Borders::ALL).title(" details "))
+                .wrap(Wrap { trim: true });
+            f.render_widget(detail_widget, split[1]);
         }
         RightView::Console => {
             let scroll_tag = if app.console_scroll > 0 {
@@ -623,23 +710,28 @@ fn ui(f: &mut Frame, app: &mut App) {
         f.render_widget(popup, area);
     }
 
-    // Add-mod results picker overlay.
+    // Add-mod results picker overlay (list + detail).
     if app.picking {
         let full = f.area();
-        let h = (app.results.len() as u16 + 2).min(full.height.saturating_sub(4)).max(5);
-        let area = centered_rect(72, h, full);
+        let area = centered_rect(78, full.height.saturating_sub(6).max(10), full);
         f.render_widget(Clear, area);
+        let split = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3), Constraint::Length(6)])
+            .split(area);
+
         let items: Vec<ListItem> = app
             .results
             .iter()
             .map(|hit| {
-                let desc: String = hit.description.chars().take(70).collect();
-                let title_line = Line::from(vec![
+                ListItem::new(Line::from(vec![
                     Span::styled(hit.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw("  "),
-                    Span::styled(desc, Style::default().fg(Color::DarkGray)),
-                ]);
-                ListItem::new(title_line)
+                    Span::styled(
+                        format!("  ↓{}", human_count(hit.downloads)),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::styled(format!("  by {}", hit.author), Style::default().fg(Color::DarkGray)),
+                ]))
             })
             .collect();
         let widget = List::new(items)
@@ -647,11 +739,27 @@ fn ui(f: &mut Frame, app: &mut App) {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::Yellow))
-                    .title(" choose a mod — Enter install · Esc cancel "),
+                    .title(" choose a mod — ↑/↓ · Enter install · Esc cancel "),
             )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("▸ ");
-        f.render_stateful_widget(widget, area, &mut app.result_state);
+        f.render_stateful_widget(widget, split[0], &mut app.result_state);
+
+        let detail = match app.result_state.selected().and_then(|i| app.results.get(i)) {
+            Some(hit) => format!(
+                "{}\n{}\n\n{} downloads · by {} · {}",
+                hit.title,
+                hit.description,
+                human_count(hit.downloads),
+                hit.author,
+                hit.categories.join(", "),
+            ),
+            None => String::new(),
+        };
+        let detail_widget = Paragraph::new(detail)
+            .block(Block::default().borders(Borders::ALL).title(" details "))
+            .wrap(Wrap { trim: true });
+        f.render_widget(detail_widget, split[1]);
     }
 }
 

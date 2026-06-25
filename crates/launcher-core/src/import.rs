@@ -104,11 +104,11 @@ pub async fn import_mods_dir(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
-    let slug_by_id: HashMap<String, String> = client
+    let project_by_id: HashMap<String, crate::modrinth::Project> = client
         .projects(&project_ids)
         .await?
         .into_iter()
-        .map(|p| (p.id, p.slug))
+        .map(|p| (p.id.clone(), p))
         .collect();
 
     // Infer pack-wide loader/game version from the resolved set when not given.
@@ -150,10 +150,13 @@ pub async fn import_mods_dir(
     for jar in &jars {
         match by_hash.get(&jar.sha1) {
             Some(v) => {
-                let slug = slug_by_id
-                    .get(&v.project_id)
-                    .cloned()
+                let project = project_by_id.get(&v.project_id);
+                let slug = project
+                    .map(|p| p.slug.clone())
                     .unwrap_or_else(|| v.project_id.clone());
+                let (title, description) = project
+                    .map(|p| (p.title.clone(), p.description.clone()))
+                    .unwrap_or_default();
                 // Prefer the file whose hash matches ours; fall back to primary.
                 let file = v
                     .files
@@ -175,6 +178,8 @@ pub async fn import_mods_dir(
                     sha1: jar.sha1.clone(),
                     url,
                     size,
+                    title,
+                    description,
                 });
             }
             None => unresolved.push(UnresolvedMod {

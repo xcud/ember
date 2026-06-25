@@ -76,6 +76,12 @@ pub struct LockedMod {
     pub sha1: String,
     pub url: String,
     pub size: u64,
+    /// Human-friendly metadata, captured at resolve time (may be empty for
+    /// older locks or mods not found on Modrinth).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 /// A jar we found on disk but could not identify on Modrinth (e.g. OptiFine,

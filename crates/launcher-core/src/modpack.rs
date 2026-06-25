@@ -149,6 +149,8 @@ pub async fn import_mrpack(
             sha1: sha1.clone(),
             url: url.clone(),
             size: f.file_size,
+            title: String::new(),
+            description: String::new(),
         });
     }
 

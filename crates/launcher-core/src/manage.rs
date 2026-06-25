@@ -25,7 +25,7 @@ pub async fn ensure_pack(client: &Client, instance: &Instance) -> anyhow::Result
 
     if pack_path.exists() {
         let pack = Pack::load(&pack_path)?;
-        let lock = if lock_path.exists() {
+        let mut lock = if lock_path.exists() {
             sync::load_lock(&lock_path)?
         } else {
             Lock { game_version: pack.game_version.clone(), loader: pack.loader, mods: Vec::new(), unresolved: Vec::new() }
@@ -35,6 +35,7 @@ pub async fn ensure_pack(client: &Client, instance: &Instance) -> anyhow::Result
         // lock looks synthetic, re-resolve by hash for accuracy.
         let synthetic = lock.mods.iter().any(|m| m.project_id.is_empty());
         if !synthetic {
+            backfill_metadata(client, &mut lock, &lock_path).await;
             return Ok((pack, lock));
         }
     }
@@ -43,6 +44,32 @@ pub async fn ensure_pack(client: &Client, instance: &Instance) -> anyhow::Result
     result.pack.write(&pack_path)?;
     result.lock.write(&lock_path)?;
     Ok((result.pack, result.lock))
+}
+
+/// Fill in title/description for lock entries that lack them (older locks), in
+/// one batch call, and persist. Best-effort: failures are ignored.
+async fn backfill_metadata(client: &Client, lock: &mut Lock, lock_path: &Path) {
+    let missing: Vec<String> = lock
+        .mods
+        .iter()
+        .filter(|m| m.title.is_empty() && !m.project_id.is_empty())
+        .map(|m| m.project_id.clone())
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let Ok(projects) = client.projects(&missing).await else { return };
+    let by_id: std::collections::HashMap<String, crate::modrinth::Project> =
+        projects.into_iter().map(|p| (p.id.clone(), p)).collect();
+    for m in &mut lock.mods {
+        if m.title.is_empty() {
+            if let Some(p) = by_id.get(&m.project_id) {
+                m.title = p.title.clone();
+                m.description = p.description.clone();
+            }
+        }
+    }
+    let _ = lock.write(lock_path);
 }
 
 pub struct AddReport {
@@ -107,13 +134,15 @@ async fn install_tree(
             report.incompatible.push(ident);
             continue;
         };
-        let slug = client
+        let project = client
             .projects(&[best.project_id.clone()])
             .await
             .ok()
-            .and_then(|ps| ps.into_iter().next())
-            .map(|p| p.slug)
-            .unwrap_or_else(|| ident.clone());
+            .and_then(|ps| ps.into_iter().next());
+        let slug = project.as_ref().map(|p| p.slug.clone()).unwrap_or_else(|| ident.clone());
+        let (title, description) = project
+            .map(|p| (p.title, p.description))
+            .unwrap_or_default();
 
         if pack.mods.contains_key(&slug) {
             report.already.push(slug);
@@ -137,6 +166,8 @@ async fn install_tree(
                 sha1: file.hashes.sha1.clone().unwrap_or_default(),
                 url: file.url.clone(),
                 size: file.size,
+                title,
+                description,
             });
             report.installed.push(format!("{slug} {}", best.version_number));
         }
@@ -227,7 +258,16 @@ pub async fn update_instance(
 ) -> anyhow::Result<UpdateSummary> {
     let (pack, old_lock) = ensure_pack(client, instance).await?;
     let plan = update::plan(client, &pack, Some(&old_lock), None, 8).await?;
-    let new_lock = plan.new_lock();
+    let mut new_lock = plan.new_lock();
+    // The version payload has no description/title; carry them from the old lock.
+    for m in &mut new_lock.mods {
+        if m.title.is_empty() {
+            if let Some(old) = old_lock.mods.iter().find(|o| o.slug == m.slug) {
+                m.title = old.title.clone();
+                m.description = old.description.clone();
+            }
+        }
+    }
 
     // Remove old versions of mods whose filenames changed.
     let new_files: HashSet<&str> = new_lock.mods.iter().map(|m| m.filename.as_str()).collect();

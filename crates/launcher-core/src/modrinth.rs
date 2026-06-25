@@ -58,6 +58,12 @@ pub struct SearchHit {
     pub title: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub downloads: u64,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub categories: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +100,10 @@ pub struct Project {
     pub slug: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub downloads: u64,
 }
 
 impl Client {
