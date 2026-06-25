@@ -90,12 +90,21 @@ impl PtySession {
         })
     }
 
-    /// The current visible screen as text (rows joined by newlines).
+    /// The current visible screen as text (rows joined by newlines), reflecting
+    /// the active scrollback position.
     pub fn screen_text(&self) -> String {
         self.parser
             .lock()
             .map(|p| p.screen().contents())
             .unwrap_or_default()
+    }
+
+    /// Scroll the view back `n` lines into history (0 = live bottom). vt100
+    /// clamps to the available history, so over-scrolling simply stops at the top.
+    pub fn set_scrollback(&self, n: usize) {
+        if let Ok(mut p) = self.parser.lock() {
+            p.set_scrollback(n);
+        }
     }
 
     /// Is the child still running?
