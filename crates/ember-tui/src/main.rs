@@ -659,24 +659,20 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(6)])
                 .split(content);
 
-            // Content-type selector strip ([ ] to switch).
-            let seg = Line::from(
-                ContentType::ALL
-                    .iter()
-                    .flat_map(|ct| {
-                        let active = *ct == app.content_type;
-                        let style = if active {
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        };
-                        vec![Span::styled(format!(" {} ", ct.label()), style), Span::raw(" ")]
-                    })
-                    .collect::<Vec<_>>(),
-            );
-            f.render_widget(Paragraph::new(seg), split[0]);
+            // Content-type selector strip — all three visible, active highlighted.
+            let ct_index = ContentType::ALL.iter().position(|c| *c == app.content_type).unwrap_or(0);
+            let ct_titles: Vec<String> = ContentType::ALL
+                .iter()
+                .map(|c| format!("{} {}", if *c == app.content_type { "▸" } else { " " }, c.label()))
+                .collect();
+            let ct_tabs = Tabs::new(ct_titles)
+                .select(ct_index)
+                .style(Style::default().fg(Color::Gray))
+                .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .divider("│");
+            f.render_widget(ct_tabs, split[0]);
 
-            let title = format!(" {} — {inst_name} ({}) · [ ] switch ", app.content_type.label(), app.mods.len());
+            let title = format!(" {} — {inst_name} ({}) · [ ] switch type ", app.content_type.label(), app.mods.len());
             let items: Vec<ListItem> = app
                 .mods
                 .iter()
