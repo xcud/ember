@@ -14,7 +14,7 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap};
 
 use ember_term::PtySession;
 use launcher_core::auth::Account;
@@ -26,6 +26,7 @@ use launcher_core::modrinth::Client;
 
 const SIDEBAR_W: u16 = 34;
 const STATUS_H: u16 = 3;
+const TABBAR_H: u16 = 1;
 
 #[derive(PartialEq, Clone, Copy)]
 enum Focus {
@@ -37,6 +38,24 @@ enum Focus {
 enum RightView {
     Mods,
     Console,
+    Properties,
+}
+
+impl RightView {
+    fn index(self) -> usize {
+        match self {
+            RightView::Mods => 0,
+            RightView::Console => 1,
+            RightView::Properties => 2,
+        }
+    }
+    fn cycle(self) -> RightView {
+        match self {
+            RightView::Mods => RightView::Console,
+            RightView::Console => RightView::Properties,
+            RightView::Properties => RightView::Mods,
+        }
+    }
 }
 
 #[derive(PartialEq)]
@@ -105,7 +124,7 @@ impl App {
         };
         app.refresh();
         app.status =
-            "Tab/←→ focus · Esc back · p play · m mods · a add · r remove · u update · n/c/d/i instance · q quit".into();
+            "Tab/←→ focus · Esc back · 1/2/3 tabs · p play · a add · r remove · u update · n/c/d/i instance · q quit".into();
         app
     }
 
@@ -360,10 +379,25 @@ impl App {
     fn fit_console(&mut self, term: Size) {
         let Some(c) = self.console.as_mut() else { return };
         let cols = term.width.saturating_sub(SIDEBAR_W + 2).max(1);
-        let rows = term.height.saturating_sub(STATUS_H + 2).max(1);
+        let rows = term.height.saturating_sub(TABBAR_H + STATUS_H + 2).max(1);
         if c.size() != (rows, cols) {
             c.resize(rows, cols);
         }
+    }
+}
+
+fn human_ago(secs: u64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(secs);
+    let d = now.saturating_sub(secs);
+    if d < 60 {
+        "just now".into()
+    } else if d < 3600 {
+        format!("{}m ago", d / 60)
+    } else if d < 86400 {
+        format!("{}h ago", d / 3600)
+    } else {
+        format!("{}d ago", d / 86400)
     }
 }
 
@@ -417,11 +451,24 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(STATUS_H)])
+        .constraints([
+            Constraint::Length(TABBAR_H),
+            Constraint::Min(3),
+            Constraint::Length(STATUS_H),
+        ])
         .split(cols[1]);
 
     let inst_name = app.selected_instance().map(|i| i.config.name.clone()).unwrap_or_default();
     let right_focused = app.focus == Focus::Right;
+
+    // Tab strip.
+    let tabs = Tabs::new(vec!["1 Mods", "2 Console", "3 Properties"])
+        .select(app.right_view.index())
+        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .divider("│");
+    f.render_widget(tabs, right[0]);
+
+    let content = right[1];
     match app.right_view {
         RightView::Mods => {
             let title = format!(" mods — {inst_name} ({}) ", app.mods.len());
@@ -435,7 +482,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                 )
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
                 .highlight_symbol("▸ ");
-            f.render_stateful_widget(widget, right[0], &mut app.mod_state);
+            f.render_stateful_widget(widget, content, &mut app.mod_state);
         }
         RightView::Console => {
             let scroll_tag = if app.console_scroll > 0 {
@@ -459,13 +506,53 @@ fn ui(f: &mut Frame, app: &mut App) {
                         .title(title),
                 )
                 .wrap(Wrap { trim: false });
-            f.render_widget(widget, right[0]);
+            f.render_widget(widget, content);
+        }
+        RightView::Properties => {
+            let text = match app.selected_instance() {
+                Some(i) => {
+                    let last = i.config.last_played.map(human_ago).unwrap_or_else(|| "never".into());
+                    let link = if i.config.linked {
+                        format!("yes → {}", i.config.game_dir.display())
+                    } else {
+                        "no".into()
+                    };
+                    format!(
+                        "Name:           {}\n\
+                         Version:        {}\n\
+                         Linked:         {}\n\
+                         Game dir:       {}\n\
+                         Shared install: {}\n\
+                         Max RAM:        {} MB\n\
+                         Mods:           {}\n\
+                         Last played:    {}",
+                        i.config.name,
+                        i.config.version_id,
+                        link,
+                        i.config.game_dir.display(),
+                        i.config.mc_home.display(),
+                        i.config.max_mb,
+                        app.mods.len(),
+                        last,
+                    )
+                }
+                None => "No instance selected.".into(),
+            };
+            let widget = Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(focused_border(right_focused))
+                        .title(format!(" properties — {inst_name} ")),
+                )
+                .wrap(Wrap { trim: false });
+            f.render_widget(widget, content);
         }
     }
 
     let status = Paragraph::new(app.status.as_str())
         .block(Block::default().borders(Borders::ALL).title(" status "));
-    f.render_widget(status, right[1]);
+    f.render_widget(status, right[2]);
 
     if app.modal != Modal::None {
         let (title, body) = match app.modal {
@@ -573,13 +660,10 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                         app.right_view = RightView::Mods;
                         app.focus = Focus::Right;
                     }
-                    KeyCode::Char('v') => {
-                        app.right_view = if app.right_view == RightView::Mods {
-                            RightView::Console
-                        } else {
-                            RightView::Mods
-                        };
-                    }
+                    KeyCode::Char('1') => app.right_view = RightView::Mods,
+                    KeyCode::Char('2') => app.right_view = RightView::Console,
+                    KeyCode::Char('3') => app.right_view = RightView::Properties,
+                    KeyCode::Char('v') => app.right_view = app.right_view.cycle(),
                     KeyCode::Enter | KeyCode::Char('p') => app.play(),
                     KeyCode::Char('x') => app.stop(),
                     KeyCode::Char('n') => app.begin(Modal::NewName),
