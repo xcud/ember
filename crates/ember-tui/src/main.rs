@@ -31,10 +31,13 @@ const SIDEBAR_W: u16 = 34;
 const STATUS_H: u16 = 3;
 const TABBAR_H: u16 = 1;
 
+/// Which zone has keyboard focus. Arrow keys move between zones spatially.
 #[derive(PartialEq, Clone, Copy)]
 enum Focus {
-    List,
-    Right,
+    List,  // instance sidebar
+    Tabs,  // main tab strip (Properties | Content | Console)
+    Types, // content-type strip (Mods | Resource Packs | Shaders)
+    Body,  // the active tab's content
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -57,6 +60,13 @@ impl RightView {
             RightView::Properties => RightView::Mods,
             RightView::Mods => RightView::Console,
             RightView::Console => RightView::Properties,
+        }
+    }
+    fn prev(self) -> RightView {
+        match self {
+            RightView::Properties => RightView::Console,
+            RightView::Mods => RightView::Properties,
+            RightView::Console => RightView::Mods,
         }
     }
 }
@@ -234,7 +244,7 @@ impl App {
         };
         app.refresh();
         app.status =
-            "Tab/←→ focus · 1/2/3 tabs · [ ] content type · p play · a add · r remove · u update · q quit".into();
+            "↑↓←→ navigate (↑ into tabs · ←→ switch · ↓/Enter in) · p play · a add · r remove · u update · q quit".into();
         app
     }
 
@@ -356,7 +366,7 @@ impl App {
                         self.console = Some(session);
                         self.console_scroll = 0;
                         self.right_view = RightView::Console;
-                        self.focus = Focus::Right;
+                        self.focus = Focus::Body;
                         self.status = format!("Launched '{}' ({}).", inst.config.name, auth.user_type);
                         if let Some(i) = self.instances.get_mut(self.selected) {
                             i.mark_played();
@@ -373,6 +383,52 @@ impl App {
         if let Some(c) = &self.console {
             c.kill();
             self.status = "Stopped.".into();
+        }
+    }
+
+    fn set_content_type(&mut self, ct: ContentType) {
+        self.content_type = ct;
+        self.right_view = RightView::Mods;
+        self.refresh_mods();
+    }
+
+    /// Descend from a strip into the next zone below it.
+    fn descend(&mut self) {
+        self.focus = match self.focus {
+            Focus::Tabs if self.right_view == RightView::Mods => Focus::Types,
+            Focus::Tabs => Focus::Body,
+            Focus::Types => Focus::Body,
+            other => other,
+        };
+    }
+
+    /// The non-navigation shortcut keys, usable from any zone.
+    fn handle_command(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Char('p') => self.play(),
+            KeyCode::Char('x') => self.stop(),
+            KeyCode::Char('a') | KeyCode::Char('/') => self.begin(Modal::AddMod),
+            KeyCode::Char('u') => self.update_instance(),
+            KeyCode::Char('r') | KeyCode::Delete => self.remove_selected_mod(),
+            KeyCode::Char('n') => self.begin(Modal::NewName),
+            KeyCode::Char('c') => self.begin(Modal::CloneName),
+            KeyCode::Char('d') => self.begin(Modal::ConfirmDelete),
+            KeyCode::Char('i') => self.begin(Modal::ImportPath),
+            KeyCode::Char('m') => {
+                self.right_view = RightView::Mods;
+                self.focus = Focus::Body;
+            }
+            KeyCode::Char('1') => self.right_view = RightView::Properties,
+            KeyCode::Char('2') => self.right_view = RightView::Mods,
+            KeyCode::Char('3') => self.right_view = RightView::Console,
+            KeyCode::Char('v') => self.right_view = self.right_view.cycle(),
+            KeyCode::Char('[') => self.set_content_type(content_prev(self.content_type)),
+            KeyCode::Char(']') => self.set_content_type(content_next(self.content_type)),
+            KeyCode::PageUp => self.console_scroll_by(10),
+            KeyCode::PageDown => self.console_scroll_by(-10),
+            KeyCode::Home if self.right_view == RightView::Console => self.set_console_scroll(2000),
+            KeyCode::End if self.right_view == RightView::Console => self.set_console_scroll(0),
+            _ => {}
         }
     }
 
@@ -642,12 +698,17 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(cols[1]);
 
     let inst_name = app.selected_instance().map(|i| i.config.name.clone()).unwrap_or_default();
-    let right_focused = app.focus == Focus::Right;
+    let right_focused = app.focus == Focus::Body;
 
-    // Tab strip.
+    // Main tab strip — highlight reversed when the strip itself is focused.
+    let tabs_hl = if app.focus == Focus::Tabs {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    };
     let tabs = Tabs::new(vec!["1 Properties", "2 Content", "3 Console"])
         .select(app.right_view.index())
-        .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .highlight_style(tabs_hl)
         .divider("│");
     f.render_widget(tabs, right[0]);
 
@@ -665,10 +726,15 @@ fn ui(f: &mut Frame, app: &mut App) {
                 .iter()
                 .map(|c| format!("{} {}", if *c == app.content_type { "▸" } else { " " }, c.label()))
                 .collect();
+            let types_hl = if app.focus == Focus::Types {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            };
             let ct_tabs = Tabs::new(ct_titles)
                 .select(ct_index)
                 .style(Style::default().fg(Color::Gray))
-                .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                .highlight_style(types_hl)
                 .divider("│");
             f.render_widget(ct_tabs, split[0]);
 
@@ -909,86 +975,87 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
                     break;
                 }
+                if key.code == KeyCode::Char('q') {
+                    break;
+                }
 
-                // Focus-dependent vertical navigation / scrolling.
-                let right_console = app.focus == Focus::Right && app.right_view == RightView::Console;
-                let right_mods = app.focus == Focus::Right && app.right_view == RightView::Mods;
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    // Esc / ← always back out to the instance list.
-                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => app.focus = Focus::List,
-                    KeyCode::Right | KeyCode::Char('l') => app.focus = Focus::Right,
-                    KeyCode::Tab => {
-                        app.focus = if app.focus == Focus::List { Focus::Right } else { Focus::List };
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if right_console {
-                            app.console_scroll_by(-1);
-                        } else if right_mods {
-                            app.mod_next();
-                        } else {
-                            app.select_next();
-                        }
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if right_console {
-                            app.console_scroll_by(1);
-                        } else if right_mods {
-                            app.mod_prev();
-                        } else {
+                let up = matches!(key.code, KeyCode::Up | KeyCode::Char('k'));
+                let down = matches!(key.code, KeyCode::Down | KeyCode::Char('j'));
+                let left = matches!(key.code, KeyCode::Left | KeyCode::Char('h'));
+                let right = matches!(key.code, KeyCode::Right | KeyCode::Char('l'));
+                let enter = key.code == KeyCode::Enter;
+                let tab = key.code == KeyCode::Tab;
+
+                // Spatial zone navigation; everything else falls to handle_command.
+                match app.focus {
+                    Focus::List => {
+                        if up {
                             app.select_prev();
+                        } else if down {
+                            app.select_next();
+                        } else if right || tab {
+                            app.focus = Focus::Body;
+                        } else if enter {
+                            app.play();
+                        } else {
+                            app.handle_command(key.code);
                         }
                     }
-                    KeyCode::PageDown => app.console_scroll_by(-10),
-                    KeyCode::PageUp => app.console_scroll_by(10),
-                    KeyCode::Home => {
-                        if right_console {
-                            app.set_console_scroll(2000); // oldest; vt100 clamps to history
-                        } else if right_mods && !app.mods.is_empty() {
-                            app.mod_state.select(Some(0));
-                        } else if !app.instances.is_empty() {
-                            app.selected = 0;
-                            app.refresh_mods();
+                    Focus::Tabs => {
+                        if left {
+                            app.right_view = app.right_view.prev();
+                        } else if right {
+                            app.right_view = app.right_view.cycle();
+                        } else if down || enter {
+                            app.descend();
+                        } else if key.code == KeyCode::Esc || tab {
+                            app.focus = Focus::List;
+                        } else {
+                            app.handle_command(key.code);
                         }
                     }
-                    KeyCode::End => {
-                        if right_console {
-                            app.set_console_scroll(0); // live bottom
-                        } else if right_mods && !app.mods.is_empty() {
-                            app.mod_state.select(Some(app.mods.len() - 1));
-                        } else if !app.instances.is_empty() {
-                            app.selected = app.instances.len() - 1;
-                            app.refresh_mods();
+                    Focus::Types => {
+                        if left {
+                            app.set_content_type(content_prev(app.content_type));
+                        } else if right {
+                            app.set_content_type(content_next(app.content_type));
+                        } else if up {
+                            app.focus = Focus::Tabs;
+                        } else if down || enter {
+                            app.focus = Focus::Body;
+                        } else if key.code == KeyCode::Esc || tab {
+                            app.focus = Focus::List;
+                        } else {
+                            app.handle_command(key.code);
                         }
                     }
-                    KeyCode::Char('m') => {
-                        app.right_view = RightView::Mods;
-                        app.focus = Focus::Right;
+                    Focus::Body => {
+                        if left || key.code == KeyCode::Esc || tab {
+                            app.focus = Focus::List;
+                        } else if up {
+                            match app.right_view {
+                                RightView::Console => app.console_scroll_by(1),
+                                RightView::Mods => {
+                                    if app.mod_state.selected().unwrap_or(0) == 0 {
+                                        app.focus = Focus::Types; // escape up into the type strip
+                                    } else {
+                                        app.mod_prev();
+                                    }
+                                }
+                                RightView::Properties => app.focus = Focus::Tabs,
+                            }
+                        } else if down {
+                            match app.right_view {
+                                RightView::Console => app.console_scroll_by(-1),
+                                RightView::Mods => app.mod_next(),
+                                RightView::Properties => {}
+                            }
+                        } else if enter && app.right_view != RightView::Console {
+                            app.play();
+                        } else {
+                            app.handle_command(key.code);
+                        }
                     }
-                    KeyCode::Char('1') => app.right_view = RightView::Properties,
-                    KeyCode::Char('2') => app.right_view = RightView::Mods,
-                    KeyCode::Char('3') => app.right_view = RightView::Console,
-                    KeyCode::Char(']') => {
-                        app.content_type = content_next(app.content_type);
-                        app.right_view = RightView::Mods;
-                        app.refresh_mods();
-                    }
-                    KeyCode::Char('[') => {
-                        app.content_type = content_prev(app.content_type);
-                        app.right_view = RightView::Mods;
-                        app.refresh_mods();
-                    }
-                    KeyCode::Char('v') => app.right_view = app.right_view.cycle(),
-                    KeyCode::Enter | KeyCode::Char('p') => app.play(),
-                    KeyCode::Char('x') => app.stop(),
-                    KeyCode::Char('n') => app.begin(Modal::NewName),
-                    KeyCode::Char('c') => app.begin(Modal::CloneName),
-                    KeyCode::Char('d') => app.begin(Modal::ConfirmDelete),
-                    KeyCode::Char('i') => app.begin(Modal::ImportPath),
-                    KeyCode::Char('a') | KeyCode::Char('/') => app.begin(Modal::AddMod),
-                    KeyCode::Char('u') => app.update_instance(),
-                    KeyCode::Delete | KeyCode::Char('r') => app.remove_selected_mod(),
-                    _ => {}
                 }
             }
         }
