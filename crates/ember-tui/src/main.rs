@@ -244,7 +244,7 @@ impl App {
         };
         app.refresh();
         app.status =
-            "↑↓←→ navigate (↑ into tabs · ←→ switch · ↓/Enter in) · p play · a add · r remove · u update · q quit".into();
+            "↑↓←→ navigate · Tab → tabs · ↓/Enter in · p play · a add · r remove · u update · q quit".into();
         app
     }
 
@@ -402,7 +402,8 @@ impl App {
         };
     }
 
-    /// The non-navigation shortcut keys, usable from any zone.
+    /// Action shortcuts (not navigation), usable from any zone. Navigation is
+    /// entirely by arrow keys; letters only ever *do* something.
     fn handle_command(&mut self, code: KeyCode) {
         match code {
             KeyCode::Char('p') => self.play(),
@@ -414,16 +415,6 @@ impl App {
             KeyCode::Char('c') => self.begin(Modal::CloneName),
             KeyCode::Char('d') => self.begin(Modal::ConfirmDelete),
             KeyCode::Char('i') => self.begin(Modal::ImportPath),
-            KeyCode::Char('m') => {
-                self.right_view = RightView::Mods;
-                self.focus = Focus::Body;
-            }
-            KeyCode::Char('1') => self.right_view = RightView::Properties,
-            KeyCode::Char('2') => self.right_view = RightView::Mods,
-            KeyCode::Char('3') => self.right_view = RightView::Console,
-            KeyCode::Char('v') => self.right_view = self.right_view.cycle(),
-            KeyCode::Char('[') => self.set_content_type(content_prev(self.content_type)),
-            KeyCode::Char(']') => self.set_content_type(content_next(self.content_type)),
             KeyCode::PageUp => self.console_scroll_by(10),
             KeyCode::PageDown => self.console_scroll_by(-10),
             KeyCode::Home if self.right_view == RightView::Console => self.set_console_scroll(2000),
@@ -986,6 +977,18 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                 let enter = key.code == KeyCode::Enter;
                 let tab = key.code == KeyCode::Tab;
 
+                // Tab is a universal hop to the main tab strip (and dives back in
+                // if already there) — the reliable way out of the console, whose
+                // arrows are taken by scrolling.
+                if tab {
+                    if app.focus == Focus::Tabs {
+                        app.descend();
+                    } else {
+                        app.focus = Focus::Tabs;
+                    }
+                    continue;
+                }
+
                 // Spatial zone navigation; everything else falls to handle_command.
                 match app.focus {
                     Focus::List => {
@@ -993,7 +996,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                             app.select_prev();
                         } else if down {
                             app.select_next();
-                        } else if right || tab {
+                        } else if right {
                             app.focus = Focus::Body;
                         } else if enter {
                             app.play();
@@ -1008,7 +1011,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                             app.right_view = app.right_view.cycle();
                         } else if down || enter {
                             app.descend();
-                        } else if key.code == KeyCode::Esc || tab {
+                        } else if key.code == KeyCode::Esc {
                             app.focus = Focus::List;
                         } else {
                             app.handle_command(key.code);
@@ -1023,14 +1026,14 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> anyhow::Result<()> 
                             app.focus = Focus::Tabs;
                         } else if down || enter {
                             app.focus = Focus::Body;
-                        } else if key.code == KeyCode::Esc || tab {
+                        } else if key.code == KeyCode::Esc {
                             app.focus = Focus::List;
                         } else {
                             app.handle_command(key.code);
                         }
                     }
                     Focus::Body => {
-                        if left || key.code == KeyCode::Esc || tab {
+                        if left || key.code == KeyCode::Esc {
                             app.focus = Focus::List;
                         } else if up {
                             match app.right_view {
