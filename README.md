@@ -147,6 +147,11 @@ companion shell.
 
 MIT — see [LICENSE](LICENSE).
 
+## Legal
+
+- [Terms of Service](docs/TERMS.md)
+- [Privacy Statement](docs/PRIVACY.md)
+
 ## Trademark notice
 
 ember is NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH
